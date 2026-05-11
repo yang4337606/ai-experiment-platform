@@ -1293,6 +1293,10 @@ const App = {
   },
 
   showAddAccountModal(serviceType) {
+    // GitHub has no credit concept; MuleRun defaults to 700/100; others 100/10
+    const creditDefaults = { github: [0, 0], mulerun: [700, 100], chatgpt: [100, 10], qwen: [100, 10] };
+    const [defBalance, defThreshold] = creditDefaults[serviceType] || [100, 10];
+    const isGitHub = serviceType === 'github';
     const body = `
       <div class="form-group"><label class="form-label">账号</label>
         <input class="form-input" id="acct-account" placeholder="用户名 / 邮箱"></div>
@@ -1301,11 +1305,12 @@ const App = {
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
         <div class="form-group"><label class="form-label">优先级 (越小越优先)</label>
           <input class="form-input" id="acct-priority" type="number" value="0"></div>
-        <div class="form-group"><label class="form-label">积分余额</label>
-          <input class="form-input" id="acct-balance" type="number" step="0.1" value="100"></div>
-        <div class="form-group"><label class="form-label">积分阈值</label>
-          <input class="form-input" id="acct-threshold" type="number" step="0.1" value="10"></div>
+        <div class="form-group"><label class="form-label">积分余额${isGitHub?' (不适用)':''}</label>
+          <input class="form-input" id="acct-balance" type="number" step="0.1" value="${defBalance}" ${isGitHub?'disabled':''}></div>
+        <div class="form-group"><label class="form-label">积分阈值${isGitHub?' (不适用)':''}</label>
+          <input class="form-input" id="acct-threshold" type="number" step="0.1" value="${defThreshold}" ${isGitHub?'disabled':''}></div>
       </div>
+      ${!isGitHub?`<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">积分阈值: 余额低于此值时，系统将自动跳过此账号并切换到下一个可用账号。</div>`:''}
       <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
         <input type="checkbox" id="acct-enabled" checked> 启用</label>`;
     const footer = `<button class="btn btn--ghost" onclick="App.closeModal()">取消</button>
