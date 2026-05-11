@@ -372,6 +372,53 @@ class ProgressContext(db.Model):
         }
 
 
+class VMwareConfigModel(db.Model):
+    """Stores VMware Workstation configuration in the database."""
+    __tablename__ = "vmware_config"
+
+    id = db.Column(db.Integer, primary_key=True)
+    vmrun_path = db.Column(db.String(512), default="")
+    vmware_host_type = db.Column(db.String(16), default="ws")        # ws | fusion | player
+    default_template_dir = db.Column(db.String(512), default="")
+    default_clone_dir = db.Column(db.String(512), default="")
+    default_snapshot_name = db.Column(db.String(128), default="clean-snapshot")
+    ssh_user = db.Column(db.String(64), default="root")
+    ssh_key_path = db.Column(db.String(512), default="")
+    ssh_timeout = db.Column(db.Integer, default=120)
+    simulation = db.Column(db.Boolean, default=True)                  # default to simulation
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "vmrun_path": self.vmrun_path,
+            "vmware_host_type": self.vmware_host_type,
+            "default_template_dir": self.default_template_dir,
+            "default_clone_dir": self.default_clone_dir,
+            "default_snapshot_name": self.default_snapshot_name,
+            "ssh_user": self.ssh_user,
+            "ssh_key_path": self.ssh_key_path,
+            "ssh_timeout": self.ssh_timeout,
+            "simulation": self.simulation,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+    def to_vmware_config(self):
+        """Convert to vmware_manager.VMwareConfig dataclass."""
+        from vmware_manager import VMwareConfig
+        return VMwareConfig(
+            vmrun_path=self.vmrun_path or "",
+            vmware_host_type=self.vmware_host_type or "ws",
+            default_template_dir=self.default_template_dir or "",
+            default_clone_dir=self.default_clone_dir or "",
+            default_snapshot_name=self.default_snapshot_name or "clean-snapshot",
+            ssh_user=self.ssh_user or "root",
+            ssh_key_path=self.ssh_key_path or "",
+            ssh_timeout=self.ssh_timeout or 120,
+            simulation=self.simulation if self.simulation is not None else True,
+        )
+
+
 class NotifyConfig(db.Model):
     __tablename__ = "notify_config"
 

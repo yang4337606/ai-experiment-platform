@@ -10,8 +10,9 @@ from flask_cors import CORS
 from models import (
     AIAnalysis, CreditLog, FailureCode, NotifyConfig, ProgressContext, Project,
     RunLog, RunStatus, ServiceCredential, TestReport, TestRun, VerifyResult,
-    db, encrypt_value, decrypt_value,
+    VMwareConfigModel, db, encrypt_value, decrypt_value,
 )
+from vmware_manager import VMwareConfig, VMwareManager, get_vmware_manager
 from workflow import WorkflowEngine
 
 # ---------------------------------------------------------------------------
@@ -465,12 +466,15 @@ def _register_routes(app):
         db.session.add(run)
         db.session.flush()
 
-        # Assign a VM IP and hostname for simulation
+        # Pre-allocate VM info (will be updated by workflow with real values)
+        vm_cfg = VMwareConfigModel.query.first()
+        is_sim = (not vm_cfg) or vm_cfg.simulation
         run.vm_info = {
             "ip": f"10.0.1.{random.randint(10, 250)}",
             "hostname": f"vm-{run.id:04d}",
             "specs": {"cpu": 4, "memory": 8, "disk": 100},
             "port": project.config.get("port", 8080) if project.config else 8080,
+            "simulation": is_sim,
         }
         db.session.commit()
 
@@ -704,6 +708,83 @@ def _register_routes(app):
     @app.route("/api/failure-codes", methods=["GET"])
     def list_failure_codes():
         return jsonify([{"code": fc.value, "name": fc.name} for fc in FailureCode])
+
+    # ---- VMware Management ----
+    @app.route("/api/vmware/config", methods=["GET"])
+    def get_vmware_config():
+        cfg = VMwareConfigModel.query.first()
+        if not cfg:
+            cfg = VMwareConfigModel(simulation=True)
+            db.session.add(cfg)
+            db.session.commit()
+        return jsonify(cfg.to_dict())
+
+    @app.route("/api/vmware/config", methods=["PUT"])
+    def update_vmware_config():
+        cfg = VMwareConfigModel.query.first()
+        if not cfg:
+            cfg = VMwareConfigModel()
+            db.session.add(cfg)
+        data = request.get_json(force=True)
+        for field in ["vmrun_path", "vmware_host_type", "default_template_dir",
+                       "default_clone_dir", "default_snapshot_name",
+                       "ssh_user", "ssh_key_path", "ssh_timeout", "simulation"]:
+            if field in data:
+                setattr(cfg, field, data[field])
+        db.session.commit()
+        # Reset singleton so next workflow picks up new config
+        import vmware_manager as _vm
+        _vm._manager = None
+        return jsonify(cfg.to_dict())
+
+    @app.route("/api/vmware/status", methods=["GET"])
+    def vmware_status():
+        """Check vmrun availability and return current mode."""
+        cfg = VMwareConfigModel.query.first()
+        vm_config = cfg.to_vmware_config() if cfg else VMwareConfig(simulation=True)
+        mgr = VMwareManager(vm_config)
+        return jsonify({
+            "simulation": mgr.is_simulation,
+            "vmrun_detected": not mgr.is_simulation or (bool(vm_config.vmrun_path)),
+            "config": cfg.to_dict() if cfg else None,
+        })
+
+    @app.route("/api/vmware/templates", methods=["GET"])
+    def list_vm_templates():
+        cfg = VMwareConfigModel.query.first()
+        vm_config = cfg.to_vmware_config() if cfg else VMwareConfig(simulation=True)
+        mgr = VMwareManager(vm_config)
+        return jsonify(mgr.list_templates())
+
+    @app.route("/api/vmware/running", methods=["GET"])
+    def list_running_vms():
+        """List currently running VMs (real mode only)."""
+        cfg = VMwareConfigModel.query.first()
+        vm_config = cfg.to_vmware_config() if cfg else VMwareConfig(simulation=True)
+        mgr = VMwareManager(vm_config)
+        if mgr.is_simulation:
+            # Return simulated running VMs from active test runs
+            active_statuses = [s.value for s in RunStatus
+                               if s not in (RunStatus.SUCCESS, RunStatus.FAILED, RunStatus.PENDING)]
+            active_runs = TestRun.query.filter(TestRun.status.in_(active_statuses)).all()
+            vms = []
+            for r in active_runs:
+                info = r.vm_info or {}
+                vms.append({
+                    "name": info.get("hostname", f"vm-{r.id:04d}"),
+                    "vmx_path": f"/vmware/clones/{info.get('hostname', 'vm')}/{info.get('hostname', 'vm')}.vmx",
+                    "state": "running",
+                    "ip": info.get("ip", ""),
+                    "run_id": r.id,
+                    "project": r.project.name if r.project else "",
+                })
+            return jsonify(vms)
+        else:
+            try:
+                running = mgr._cli.list_running()
+                return jsonify([{"vmx_path": p, "state": "running"} for p in running])
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
 
     # ---- Health check ----
     @app.route("/health")

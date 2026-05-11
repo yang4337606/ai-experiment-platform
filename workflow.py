@@ -328,6 +328,7 @@ class WorkflowEngine:
       - Failure classification (8 enum codes)
       - Progress context sync on account switch
       - Enhanced notifications with failure code & AI summary
+      - VMware Workstation integration via vmrun CLI
     """
 
     STEP_TIMEOUT = 30 * 60      # 30 minutes per step
@@ -340,6 +341,8 @@ class WorkflowEngine:
         self._thread = None
         self._start_wall = None
         self._current_credential = None  # active AI account
+        self._vm_manager = None          # VMwareManager instance
+        self._vm_info = None             # VMInfo for the current run
 
     # ------------------------------------------------------------------
     # Public interface
@@ -416,6 +419,18 @@ class WorkflowEngine:
 
     def _total_elapsed(self):
         return time.time() - self._start_wall if self._start_wall else 0
+
+    def _init_vm_manager(self, session):
+        """Initialize VMwareManager from DB config."""
+        from models import VMwareConfigModel
+        from vmware_manager import VMwareConfig, VMwareManager, VMInfo
+        cfg = VMwareConfigModel.query.first()
+        if cfg:
+            vm_config = cfg.to_vmware_config()
+        else:
+            vm_config = VMwareConfig(simulation=True)
+        self._vm_manager = VMwareManager(vm_config)
+        return self._vm_manager
 
     # ------------------------------------------------------------------
     # Credit monitoring & account pool (设计文档 4.4.4)
@@ -567,15 +582,97 @@ class WorkflowEngine:
     # ------------------------------------------------------------------
 
     def _step_init_vm(self, session, run, ctx):
+        from vmware_manager import VMInfo
         self._set_status(session, run, "init_vm")
         _rnd(1.5, 2.5)
-        self._emit_logs(session, run, _VM_INIT_LOGS, "init_vm", "install", ctx)
-        self._add_log(session, run, "init_vm", "[初始化] 虚拟机准备就绪，正在进行下一步...", "install", ctx.get("round_number", 1))
+
+        # Initialize VM manager
+        mgr = self._init_vm_manager(session)
+        project_name = run.project.name if run.project else "app"
+        vm_name = f"vm-{run.id:04d}-{project_name.replace(' ', '-')[:20]}"
+
+        # Get first available template
+        templates = mgr.list_templates()
+        if templates:
+            template_vmx = templates[0]["vmx_path"]
+            self._add_log(session, run, "init_vm",
+                f"[初始化] 选择模板: {templates[0]['name']} ({template_vmx})",
+                "install")
+        else:
+            template_vmx = ""
+            self._add_log(session, run, "init_vm",
+                "[初始化] 无可用模板，使用默认配置", "install")
+
+        # Clone VM
+        self._add_log(session, run, "init_vm",
+            f"[初始化] 正在克隆虚拟机 {vm_name}...", "install")
+        _rnd(0.5, 1.0)
+
+        vm_info = mgr.clone_vm(template_vmx, vm_name)
+        self._vm_info = vm_info
+
+        # Start VM
+        self._add_log(session, run, "init_vm",
+            f"[初始化] 正在启动虚拟机 {vm_name}...", "install")
+        _rnd(0.5, 1.0)
+
+        vm_info = mgr.start_vm(vm_info)
+
+        # Wait for SSH
+        self._add_log(session, run, "init_vm",
+            f"[SSH] 等待 SSH 服务就绪...", "install")
+        ssh_ready = mgr.wait_for_ssh(vm_info)
+        if ssh_ready:
+            self._add_log(session, run, "init_vm",
+                f"[SSH] SSH 服务启动成功，IP: {vm_info.ip}", "install")
+        else:
+            self._add_log(session, run, "init_vm",
+                "[SSH] 警告: SSH 等待超时，继续执行...", "install")
+
+        # Update run VM info
+        run.vm_info = {
+            "ip": vm_info.ip,
+            "hostname": vm_name,
+            "specs": vm_info.specs,
+            "port": run.project.config.get("port", 8080) if run.project and run.project.config else 8080,
+            "vmx_path": vm_info.vmx_path,
+            "simulation": mgr.is_simulation,
+        }
+        ctx["ip"] = vm_info.ip
+        ctx["hostname"] = vm_name
+        session.commit()
+
+        # Emit remaining standard logs for detailed display
+        remaining_logs = [
+            f"[网络] IP 地址已分配: {vm_info.ip}",
+            f"[主机名] 设置主机名为: {vm_name}",
+            f"[系统] OS: Ubuntu 22.04 LTS  CPU: {vm_info.specs.get('cpu', 4)} vCPU  内存: {vm_info.specs.get('memory', 8)}GB",
+            "[系统] 时区已同步至 Asia/Shanghai",
+            f"[初始化] 虚拟机准备就绪 {'(模拟模式)' if mgr.is_simulation else '(vmrun)'}，正在进行下一步...",
+        ]
+        for line in remaining_logs:
+            self._add_log(session, run, "init_vm", line, "install")
+            _rnd(0.05, 0.15)
 
     def _step_snapshot(self, session, run, ctx):
         self._set_status(session, run, "snapshot")
         _rnd(1.0, 2.0)
-        self._emit_logs(session, run, _SNAPSHOT_LOGS, "snapshot", "install", ctx)
+
+        mgr = self._vm_manager
+        vm_info = self._vm_info
+
+        if mgr and vm_info:
+            self._add_log(session, run, "snapshot",
+                f"[快照] 开始对虚拟机 {vm_info.name} 创建基础快照...", "install")
+            _rnd(0.3, 0.5)
+            snap_name = mgr.create_snapshot(vm_info)
+            ctx["snap_id"] = snap_name
+            self._add_log(session, run, "snapshot",
+                f"[快照] 快照 {snap_name} 创建成功", "install")
+            self._add_log(session, run, "snapshot",
+                "[快照] 基础快照创建完成，可用于回滚", "install")
+        else:
+            self._emit_logs(session, run, _SNAPSHOT_LOGS, "snapshot", "install", ctx)
 
     def _step_pull_code(self, session, run, ctx):
         self._set_status(session, run, "code_pull")
@@ -736,7 +833,24 @@ class WorkflowEngine:
     def _step_rollback(self, session, run, ctx):
         self._set_status(session, run, "rollback")
         _rnd(1.5, 2.5)
-        self._emit_logs(session, run, _ROLLBACK_LOGS, "rollback", "install", ctx)
+
+        mgr = self._vm_manager
+        vm_info = self._vm_info
+
+        if mgr and vm_info:
+            snap_name = vm_info.snapshot_name or mgr.config.default_snapshot_name
+            self._add_log(session, run, "rollback",
+                "[回滚] 验证和修复均告失败，开始执行虚拟机回滚...", "install")
+            self._add_log(session, run, "rollback",
+                f"[回滚] 定位基础快照: {snap_name}", "install")
+            _rnd(0.5, 1.0)
+            mgr.revert_snapshot(vm_info, snap_name)
+            self._add_log(session, run, "rollback",
+                "[回滚] 虚拟机已回滚至初始干净状态", "install")
+            self._add_log(session, run, "rollback",
+                "[回滚] 回滚完成，请人工排查问题后手动重试", "install")
+        else:
+            self._emit_logs(session, run, _ROLLBACK_LOGS, "rollback", "install", ctx)
 
     # ------------------------------------------------------------------
     # Verify result recording
