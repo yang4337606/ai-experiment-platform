@@ -790,12 +790,68 @@ const App = {
   },
 
   // === Run Detail ===
+  _runDetailStatus: null,
+  _pollingBusy: false,
+
   async loadRunDetail(id) {
     this.state.runDetailId = id;
+    this._runDetailStatus = null;
+    this._pollingBusy = false;
     const el = document.getElementById('page-run-detail');
     const run = await this.api.get('/api/runs/' + id);
     if (!run) { el.innerHTML = '<div class="empty-state"><p>运行记录不存在</p></div>'; return; }
+    this._runDetailStatus = run.status;
+    this._renderRunDetail(el, run);
+    // Load logs
+    const logs = await this.api.get('/api/runs/' + id + '/logs');
+    this._renderLogs(logs);
+    this._renderAI(run);
+    this._renderVerify(run);
+    // Start polling if active - only one interval, no recursion
     const isActive = !['success','failed'].includes(run.status);
+    if (isActive) {
+      this.state.polling = setInterval(() => this._pollRunDetail(id), 3000);
+    }
+  },
+
+  async _pollRunDetail(id) {
+    if (this._pollingBusy) return;
+    if (this.state.currentPage !== 'run-detail') { this.stopPolling(); return; }
+    this._pollingBusy = true;
+    try {
+      const [run, logs] = await Promise.all([
+        this.api.get('/api/runs/' + id),
+        this.api.get('/api/runs/' + id + '/logs')
+      ]);
+      if (!run) return;
+      // If status changed, update the full layout once (no recursive call)
+      if (run.status !== this._runDetailStatus) {
+        this._runDetailStatus = run.status;
+        const el = document.getElementById('page-run-detail');
+        if (el) this._renderRunDetail(el, run);
+      }
+      this._renderLogs(logs);
+      this._renderAI(run);
+      this._renderVerify(run);
+      // Stop polling if run finished
+      if (['success','failed'].includes(run.status)) {
+        this.stopPolling();
+        // Final full re-render to show retry button etc.
+        const el = document.getElementById('page-run-detail');
+        if (el) this._renderRunDetail(el, run);
+        this._renderLogs(logs);
+        this._renderAI(run);
+        this._renderVerify(run);
+      }
+    } finally {
+      this._pollingBusy = false;
+    }
+  },
+
+  _renderRunDetail(el, run) {
+    // Preserve current active tab
+    const activeTab = el.querySelector && el.querySelector('#run-tabs .tab.active');
+    const currentTab = activeTab ? activeTab.dataset.tab : 'logs';
     el.innerHTML = `
       <div class="flex-between mb-16">
         <div style="display:flex;align-items:center;gap:12px">
@@ -817,33 +873,15 @@ const App = {
         <div class="detail-item"><div class="detail-label">VM 信息</div><div class="detail-value">${run.vm_info?`${run.vm_info.ip||''} (${run.vm_info.hostname||''})`:'分配中...'}</div></div>
       </div>
       <div class="tabs" id="run-tabs">
-        <div class="tab active" data-tab="logs" onclick="App.switchRunTab('logs')">运行日志</div>
-        <div class="tab" data-tab="ai" onclick="App.switchRunTab('ai')">AI 分析</div>
-        <div class="tab" data-tab="verify" onclick="App.switchRunTab('verify')">验证结果</div>
+        <div class="tab ${currentTab==='logs'?'active':''}" data-tab="logs" onclick="App.switchRunTab('logs')">运行日志</div>
+        <div class="tab ${currentTab==='ai'?'active':''}" data-tab="ai" onclick="App.switchRunTab('ai')">AI 分析</div>
+        <div class="tab ${currentTab==='verify'?'active':''}" data-tab="verify" onclick="App.switchRunTab('verify')">验证结果</div>
       </div>
-      <div id="run-tab-logs" class="run-tab-content">
+      <div id="run-tab-logs" class="run-tab-content" style="${currentTab==='logs'?'':'display:none'}">
         <div class="log-viewer" id="log-viewer"></div>
       </div>
-      <div id="run-tab-ai" class="run-tab-content" style="display:none"></div>
-      <div id="run-tab-verify" class="run-tab-content" style="display:none"></div>`;
-    // Load logs
-    await this.refreshRunLogs(id);
-    await this.refreshRunAI(id);
-    await this.refreshRunVerify(id);
-    // Start polling if active
-    if (isActive) {
-      this.state.polling = setInterval(async () => {
-        if (this.state.currentPage !== 'run-detail') { this.stopPolling(); return; }
-        const fresh = await this.api.get('/api/runs/' + id);
-        if (fresh) {
-          // Update status badge and pipeline
-          if (fresh.status !== run.status) { this.loadRunDetail(id); return; }
-        }
-        await this.refreshRunLogs(id);
-        await this.refreshRunAI(id);
-        await this.refreshRunVerify(id);
-      }, 3000);
-    }
+      <div id="run-tab-ai" class="run-tab-content" style="${currentTab==='ai'?'':'display:none'}"></div>
+      <div id="run-tab-verify" class="run-tab-content" style="${currentTab==='verify'?'':'display:none'}"></div>`;
   },
 
   switchRunTab(tab) {
@@ -854,8 +892,7 @@ const App = {
     });
   },
 
-  async refreshRunLogs(id) {
-    const logs = await this.api.get('/api/runs/' + id + '/logs');
+  _renderLogs(logs) {
     if (!logs) return;
     const viewer = document.getElementById('log-viewer');
     if (!viewer) return;
@@ -872,10 +909,9 @@ const App = {
     if (wasAtBottom) viewer.scrollTop = viewer.scrollHeight;
   },
 
-  async refreshRunAI(id) {
+  _renderAI(run) {
     const el = document.getElementById('run-tab-ai');
     if (!el) return;
-    const run = await this.api.get('/api/runs/' + id);
     if (!run || !run.analyses || run.analyses.length === 0) {
       el.innerHTML = '<div class="empty-state"><p>暂无 AI 分析记录</p></div>';
       return;
@@ -890,15 +926,13 @@ const App = {
       </div>`).join('');
   },
 
-  async refreshRunVerify(id) {
+  _renderVerify(run) {
     const el = document.getElementById('run-tab-verify');
     if (!el) return;
-    const run = await this.api.get('/api/runs/' + id);
     if (!run || !run.verify_results || run.verify_results.length === 0) {
       el.innerHTML = '<div class="empty-state"><p>暂无验证结果</p></div>';
       return;
     }
-    // Group by round
     const rounds = {};
     run.verify_results.forEach(v => { const rn = v.round_number||1; if(!rounds[rn]) rounds[rn]=[]; rounds[rn].push(v); });
     el.innerHTML = Object.entries(rounds).map(([rn, items]) => `
