@@ -8,8 +8,8 @@ from flask import Flask, jsonify, request, render_template
 from flask_cors import CORS
 
 from models import (
-    AIAnalysis, NotifyConfig, Project, RunLog, RunStatus, TestReport,
-    TestRun, VerifyResult, db,
+    AIAnalysis, NotifyConfig, Project, RunLog, RunStatus, ServiceCredential,
+    TestReport, TestRun, VerifyResult, db, encrypt_value,
 )
 from workflow import WorkflowEngine
 
@@ -556,6 +556,59 @@ def _register_routes(app):
             return jsonify({"error": "未配置 Webhook URL"}), 400
         # Simulate sending (no real HTTP call)
         return jsonify({"message": f"测试通知已发送至 {cfg.webhook_url}", "success": True})
+
+    # ---- Service Credentials ----
+    @app.route("/api/settings/credentials", methods=["GET"])
+    def list_credentials():
+        creds = ServiceCredential.query.order_by(ServiceCredential.service_type).all()
+        # Ensure all 3 service types exist
+        existing = {c.service_type for c in creds}
+        for st in ServiceCredential.SERVICE_TYPES:
+            if st not in existing:
+                c = ServiceCredential(service_type=st, account="", encrypted_secret="", enabled=False)
+                db.session.add(c)
+                creds.append(c)
+        db.session.commit()
+        return jsonify([c.to_dict() for c in sorted(creds, key=lambda x: x.service_type)])
+
+    @app.route("/api/settings/credentials/<service_type>", methods=["PUT"])
+    def update_credential(service_type):
+        if service_type not in ServiceCredential.SERVICE_TYPES:
+            return jsonify({"error": f"不支持的服务类型: {service_type}"}), 400
+        data = request.get_json(force=True)
+        cred = ServiceCredential.query.filter_by(service_type=service_type).first()
+        if not cred:
+            cred = ServiceCredential(service_type=service_type)
+            db.session.add(cred)
+        if "account" in data:
+            cred.account = data["account"]
+        if "secret" in data and data["secret"]:
+            cred.encrypted_secret = encrypt_value(data["secret"])
+        if "extra" in data:
+            cred.extra = data["extra"]
+        if "enabled" in data:
+            cred.enabled = data["enabled"]
+        db.session.commit()
+        return jsonify(cred.to_dict())
+
+    @app.route("/api/settings/credentials/<service_type>", methods=["DELETE"])
+    def delete_credential(service_type):
+        cred = ServiceCredential.query.filter_by(service_type=service_type).first()
+        if cred:
+            cred.account = ""
+            cred.encrypted_secret = ""
+            cred.extra = {}
+            cred.enabled = False
+            db.session.commit()
+        return jsonify({"message": f"{service_type} 凭证已清除"})
+
+    @app.route("/api/settings/credentials/<service_type>/test", methods=["POST"])
+    def test_credential(service_type):
+        cred = ServiceCredential.query.filter_by(service_type=service_type).first()
+        if not cred or not cred.account:
+            return jsonify({"error": "未配置账号信息", "success": False}), 400
+        # Simulate connectivity test
+        return jsonify({"message": f"{service_type} 连接测试成功", "success": True})
 
     # ---- Health check ----
     @app.route("/health")

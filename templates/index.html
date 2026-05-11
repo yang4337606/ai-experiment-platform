@@ -1019,10 +1019,71 @@ const App = {
   // === Settings ===
   async loadSettings() {
     const el = document.getElementById('page-settings');
-    const cfg = await this.api.get('/api/settings/notify');
+    const [cfg, creds] = await Promise.all([
+      this.api.get('/api/settings/notify'),
+      this.api.get('/api/settings/credentials')
+    ]);
+    const serviceLabels = { github: 'GitHub', mulerun: 'MuleRun', chatgpt: 'ChatGPT' };
+    const serviceIcons = { github: '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 .3a12 12 0 00-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.3 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 016 0C17 4.7 18 5 18 5c.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0012 .3"/></svg>', mulerun: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>', chatgpt: '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M22.3 10.3c.3-1.5 0-3.1-.9-4.4A6.1 6.1 0 0014.7.8a6.2 6.2 0 00-5.9 1.5A6.1 6.1 0 005 4.6a6.2 6.2 0 00-3.3 5.1c-.3 1.5 0 3.1.9 4.4a6.1 6.1 0 006.7 5.1 6.2 6.2 0 005.9-1.5 6.1 6.1 0 003.8-2.3 6.2 6.2 0 003.3-5.1zm-9.6 9.3a4.6 4.6 0 01-3-.9l.1-.1 5-2.9a.8.8 0 00.4-.7V10l2.1 1.2v5.8a4.7 4.7 0 01-4.6 2.6zM3.9 17a4.6 4.6 0 01-.5-3.2l.1.1 5 2.9a.8.8 0 00.8 0l6.1-3.5v2.5L9.5 19a4.7 4.7 0 01-5.6-2zm-1.4-10a4.6 4.6 0 012.5-2l0 .1v5.8a.8.8 0 00.4.7l6.1 3.5-2.1 1.2L3.5 13a4.7 4.7 0 01-1-6.1zM19.4 12l-6.1-3.5 2.1-1.2 5.9 3.4a4.7 4.7 0 01-.8 8.4V13.3a.8.8 0 00-.4-.7l-.7-.6zm2.1-3.2l-.1-.1-5-2.9a.8.8 0 00-.8 0L9.5 9.3V6.8l5.9-3.4a4.7 4.7 0 015.5 1.6 4.6 4.6 0 01.6 3.8zM8.3 13l-2.1-1.2V6a4.7 4.7 0 015.1-4.7 4.6 4.6 0 012.5 1.8l-.1.1-5 2.9a.8.8 0 00-.4.7V13zm1.1-2.5L12 9l2.6 1.5v3L12 15l-2.6-1.5v-3z"/></svg>' };
+    const serviceHints = { github: '填写 GitHub 用户名和 Personal Access Token (PAT)', mulerun: '填写 MuleRun 账号和 API Key', chatgpt: '填写 OpenAI 账号邮箱和 API Key' };
+    const accountPlaceholders = { github: 'GitHub 用户名', mulerun: 'MuleRun 账号 / 邮箱', chatgpt: 'OpenAI 邮箱' };
+    const secretPlaceholders = { github: 'Personal Access Token (ghp_...)', mulerun: 'API Key', chatgpt: 'API Key (sk-...)' };
+
     el.innerHTML = `
       <div class="section-title mb-16">系统设置</div>
-      <div class="card" style="max-width:600px">
+      <div class="card" style="max-width:640px">
+        <div class="card-header" style="gap:8px">
+          <span style="display:flex;align-items:center;gap:8px">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+            第三方服务账号管理
+          </span>
+          <span style="font-size:11px;font-weight:400;color:var(--accent-green);display:flex;align-items:center;gap:4px">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            Fernet AES-128 加密存储
+          </span>
+        </div>
+        <div style="padding:20px">
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:16px;padding:10px 12px;background:var(--bg-elevated);border-radius:var(--radius);border-left:3px solid var(--accent-blue)">
+            所有密码和密钥使用 Fernet 对称加密后存入数据库，不以明文保存。修改密码时请填写新值，留空表示不更改。
+          </div>
+          ${(creds||[]).map(c => {
+            const st = c.service_type;
+            return `
+          <div style="border:1px solid var(--border);border-radius:var(--radius-lg);padding:16px;margin-bottom:16px;${c.enabled?'border-left:3px solid var(--accent-green)':'border-left:3px solid var(--text-muted)'}">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="color:${c.enabled?'var(--accent-blue)':'var(--text-muted)'}">${serviceIcons[st]||''}</span>
+                <span style="font-weight:600;font-size:14px">${serviceLabels[st]||st}</span>
+                ${c.enabled?'<span class="badge badge--success"><span class="badge-dot"></span>已启用</span>':'<span class="badge badge--pending"><span class="badge-dot"></span>未启用</span>'}
+              </div>
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text-secondary)">
+                <input type="checkbox" id="cred-enabled-${st}" ${c.enabled?'checked':''}> 启用
+              </label>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">${serviceHints[st]||''}</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div class="form-group" style="margin-bottom:0">
+                <label class="form-label">账号</label>
+                <input class="form-input" id="cred-account-${st}" value="${this.escHtml(c.account||'')}" placeholder="${accountPlaceholders[st]||'账号'}">
+              </div>
+              <div class="form-group" style="margin-bottom:0">
+                <label class="form-label">密码 / 密钥</label>
+                <div style="position:relative">
+                  <input class="form-input" id="cred-secret-${st}" type="password" placeholder="${c.secret_masked?'已配置 ('+c.secret_masked+')':secretPlaceholders[st]||'密码/密钥'}" value="">
+                  <button onclick="App.toggleSecretVis('${st}')" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:13px" id="cred-eye-${st}" title="显示/隐藏">&#128065;</button>
+                </div>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:12px">
+              <button class="btn btn--primary btn--sm" onclick="App.saveCredential('${st}')">保存</button>
+              <button class="btn btn--ghost btn--sm" onclick="App.testCredential('${st}')">测试连接</button>
+              <button class="btn btn--ghost btn--sm" style="color:var(--accent-red)" onclick="App.clearCredential('${st}')">清除</button>
+            </div>
+          </div>`;
+          }).join('')}
+        </div>
+      </div>
+      <div class="card mt-16" style="max-width:640px">
         <div class="card-header">微信通知配置</div>
         <div style="padding:20px">
           <div class="form-group"><label class="form-label">Webhook 地址</label>
@@ -1044,7 +1105,7 @@ const App = {
           </div>
         </div>
       </div>
-      <div class="card mt-16" style="max-width:600px">
+      <div class="card mt-16" style="max-width:640px">
         <div class="card-header">超时与重试配置</div>
         <div style="padding:20px">
           <div class="detail-grid">
@@ -1055,6 +1116,35 @@ const App = {
           </div>
         </div>
       </div>`;
+  },
+
+  toggleSecretVis(st) {
+    const inp = document.getElementById('cred-secret-' + st);
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+  },
+
+  async saveCredential(st) {
+    const account = document.getElementById('cred-account-' + st).value;
+    const secret = document.getElementById('cred-secret-' + st).value;
+    const enabled = document.getElementById('cred-enabled-' + st).checked;
+    const data = { account, enabled };
+    if (secret) data.secret = secret;
+    await this.api.put('/api/settings/credentials/' + st, data);
+    this.toast(st + ' 凭证已保存', 'success');
+    this.loadSettings();
+  },
+
+  async testCredential(st) {
+    const r = await this.api.post('/api/settings/credentials/' + st + '/test', {});
+    if (r && r.success) this.toast(r.message, 'success');
+    else this.toast(r && r.error ? r.error : '测试失败', 'error');
+  },
+
+  async clearCredential(st) {
+    if (!confirm('确定清除 ' + st + ' 的凭证信息?')) return;
+    await this.api.del('/api/settings/credentials/' + st);
+    this.toast(st + ' 凭证已清除', 'success');
+    this.loadSettings();
   },
 
   async saveSettings() {

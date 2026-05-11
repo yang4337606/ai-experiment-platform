@@ -2,11 +2,49 @@
 SQLAlchemy models for AI Automated Experiment Platform (AI自动化实验平台)
 """
 import enum
+import os
 from datetime import datetime
 
+from cryptography.fernet import Fernet
 from flask_sqlalchemy import SQLAlchemy
 
 db = SQLAlchemy()
+
+# ---------------------------------------------------------------------------
+# Encryption helpers – derive a stable Fernet key from an env var or generate
+# one and persist it beside the DB file.
+# ---------------------------------------------------------------------------
+_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".credential_key")
+
+
+def _load_fernet_key() -> bytes:
+    env_key = os.environ.get("CREDENTIAL_KEY")
+    if env_key:
+        return env_key.encode()
+    if os.path.exists(_KEY_FILE):
+        with open(_KEY_FILE, "rb") as f:
+            return f.read().strip()
+    key = Fernet.generate_key()
+    with open(_KEY_FILE, "wb") as f:
+        f.write(key)
+    return key
+
+
+_fernet = Fernet(_load_fernet_key())
+
+
+def encrypt_value(plain: str) -> str:
+    """Encrypt a plaintext string and return a base64 token."""
+    if not plain:
+        return ""
+    return _fernet.encrypt(plain.encode()).decode()
+
+
+def decrypt_value(token: str) -> str:
+    """Decrypt a Fernet token back to plaintext."""
+    if not token:
+        return ""
+    return _fernet.decrypt(token.encode()).decode()
 
 
 class RunStatus(str, enum.Enum):
@@ -192,6 +230,47 @@ class TestReport(db.Model):
             "commits": self.commits or [],
             "final_status": self.final_status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class ServiceCredential(db.Model):
+    """Stores encrypted credentials for third-party services (GitHub / MuleRun / ChatGPT)."""
+    __tablename__ = "service_credential"
+
+    id = db.Column(db.Integer, primary_key=True)
+    service_type = db.Column(db.String(32), nullable=False, unique=True)   # github | mulerun | chatgpt
+    account = db.Column(db.String(256), default="")                        # username / email (plain)
+    encrypted_secret = db.Column(db.Text, default="")                      # password / token (encrypted)
+    extra = db.Column(db.JSON, default=dict)                               # any extra fields (e.g. api_base)
+    enabled = db.Column(db.Boolean, default=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    SERVICE_TYPES = ("github", "mulerun", "chatgpt")
+
+    def to_dict(self, unmask=False):
+        """Return a dict. Secrets are masked unless *unmask* is True."""
+        secret = ""
+        if self.encrypted_secret:
+            if unmask:
+                try:
+                    secret = decrypt_value(self.encrypted_secret)
+                except Exception:
+                    secret = ""
+            else:
+                # Show only last 4 chars
+                try:
+                    raw = decrypt_value(self.encrypted_secret)
+                    secret = "••••••••" + raw[-4:] if len(raw) > 4 else "••••"
+                except Exception:
+                    secret = "••••"
+        return {
+            "id": self.id,
+            "service_type": self.service_type,
+            "account": self.account or "",
+            "secret_masked": secret,
+            "extra": self.extra or {},
+            "enabled": self.enabled,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
 
