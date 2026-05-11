@@ -8,8 +8,9 @@ from flask import Flask, jsonify, request, render_template
 from flask_cors import CORS
 
 from models import (
-    AIAnalysis, NotifyConfig, Project, RunLog, RunStatus, ServiceCredential,
-    TestReport, TestRun, VerifyResult, db, encrypt_value,
+    AIAnalysis, CreditLog, FailureCode, NotifyConfig, ProgressContext, Project,
+    RunLog, RunStatus, ServiceCredential, TestReport, TestRun, VerifyResult,
+    db, encrypt_value, decrypt_value,
 )
 from workflow import WorkflowEngine
 
@@ -557,58 +558,152 @@ def _register_routes(app):
         # Simulate sending (no real HTTP call)
         return jsonify({"message": f"测试通知已发送至 {cfg.webhook_url}", "success": True})
 
-    # ---- Service Credentials ----
+    # ---- Service Credentials (Account Pool) ----
     @app.route("/api/settings/credentials", methods=["GET"])
     def list_credentials():
-        creds = ServiceCredential.query.order_by(ServiceCredential.service_type).all()
-        # Ensure all 3 service types exist
-        existing = {c.service_type for c in creds}
-        for st in ServiceCredential.SERVICE_TYPES:
-            if st not in existing:
-                c = ServiceCredential(service_type=st, account="", encrypted_secret="", enabled=False)
-                db.session.add(c)
-                creds.append(c)
-        db.session.commit()
-        return jsonify([c.to_dict() for c in sorted(creds, key=lambda x: x.service_type)])
+        creds = ServiceCredential.query.order_by(
+            ServiceCredential.service_type, ServiceCredential.priority
+        ).all()
+        # Group by service_type
+        grouped = {}
+        for c in creds:
+            grouped.setdefault(c.service_type, []).append(c.to_dict())
+        return jsonify(grouped)
 
-    @app.route("/api/settings/credentials/<service_type>", methods=["PUT"])
-    def update_credential(service_type):
-        if service_type not in ServiceCredential.SERVICE_TYPES:
-            return jsonify({"error": f"不支持的服务类型: {service_type}"}), 400
+    @app.route("/api/settings/credentials/<service_type>", methods=["GET"])
+    def list_credentials_for_service(service_type):
+        creds = ServiceCredential.query.filter_by(service_type=service_type).order_by(
+            ServiceCredential.priority
+        ).all()
+        return jsonify([c.to_dict() for c in creds])
+
+    @app.route("/api/settings/credentials", methods=["POST"])
+    def create_credential():
         data = request.get_json(force=True)
-        cred = ServiceCredential.query.filter_by(service_type=service_type).first()
-        if not cred:
-            cred = ServiceCredential(service_type=service_type)
-            db.session.add(cred)
-        if "account" in data:
-            cred.account = data["account"]
+        st = data.get("service_type", "")
+        if st not in ServiceCredential.SERVICE_TYPES:
+            return jsonify({"error": f"不支持的服务类型: {st}"}), 400
+        if not data.get("account"):
+            return jsonify({"error": "账号不能为空"}), 400
+        cred = ServiceCredential(
+            service_type=st,
+            account=data["account"],
+            encrypted_secret=encrypt_value(data.get("secret", "")),
+            priority=data.get("priority", 0),
+            credit_balance=data.get("credit_balance", 0.0),
+            credit_threshold=data.get("credit_threshold", 10.0),
+            extra=data.get("extra", {}),
+            enabled=data.get("enabled", True),
+        )
+        db.session.add(cred)
+        db.session.commit()
+        return jsonify(cred.to_dict()), 201
+
+    @app.route("/api/settings/credentials/<int:cred_id>", methods=["PUT"])
+    def update_credential(cred_id):
+        cred = ServiceCredential.query.get_or_404(cred_id)
+        data = request.get_json(force=True)
+        for field in ["account", "priority", "credit_balance", "credit_threshold", "extra", "enabled"]:
+            if field in data:
+                setattr(cred, field, data[field])
         if "secret" in data and data["secret"]:
             cred.encrypted_secret = encrypt_value(data["secret"])
-        if "extra" in data:
-            cred.extra = data["extra"]
-        if "enabled" in data:
-            cred.enabled = data["enabled"]
         db.session.commit()
         return jsonify(cred.to_dict())
 
-    @app.route("/api/settings/credentials/<service_type>", methods=["DELETE"])
-    def delete_credential(service_type):
-        cred = ServiceCredential.query.filter_by(service_type=service_type).first()
-        if cred:
-            cred.account = ""
-            cred.encrypted_secret = ""
-            cred.extra = {}
-            cred.enabled = False
-            db.session.commit()
-        return jsonify({"message": f"{service_type} 凭证已清除"})
+    @app.route("/api/settings/credentials/<int:cred_id>", methods=["DELETE"])
+    def delete_credential(cred_id):
+        cred = ServiceCredential.query.get_or_404(cred_id)
+        db.session.delete(cred)
+        db.session.commit()
+        return jsonify({"message": "账号已删除"})
 
-    @app.route("/api/settings/credentials/<service_type>/test", methods=["POST"])
-    def test_credential(service_type):
-        cred = ServiceCredential.query.filter_by(service_type=service_type).first()
-        if not cred or not cred.account:
+    @app.route("/api/settings/credentials/<int:cred_id>/test", methods=["POST"])
+    def test_credential(cred_id):
+        cred = ServiceCredential.query.get_or_404(cred_id)
+        if not cred.account:
             return jsonify({"error": "未配置账号信息", "success": False}), 400
-        # Simulate connectivity test
-        return jsonify({"message": f"{service_type} 连接测试成功", "success": True})
+        return jsonify({"message": f"{cred.service_type} ({cred.account}) 连接测试成功", "success": True})
+
+    # ---- Credit Monitoring ----
+    @app.route("/api/credits/overview", methods=["GET"])
+    def credits_overview():
+        """Return credit status for all AI provider accounts."""
+        ai_types = ServiceCredential.AI_FAILOVER_CHAIN
+        result = {}
+        for st in ai_types:
+            accounts = ServiceCredential.query.filter_by(service_type=st, enabled=True).order_by(
+                ServiceCredential.priority
+            ).all()
+            result[st] = [{
+                "id": a.id,
+                "account": a.account,
+                "credit_balance": a.credit_balance,
+                "credit_threshold": a.credit_threshold,
+                "is_low": a.credit_balance < a.credit_threshold,
+                "priority": a.priority,
+            } for a in accounts]
+        return jsonify(result)
+
+    @app.route("/api/credits/<int:cred_id>/recharge", methods=["POST"])
+    def recharge_credit(cred_id):
+        cred = ServiceCredential.query.get_or_404(cred_id)
+        data = request.get_json(force=True)
+        amount = data.get("amount", 0)
+        if amount <= 0:
+            return jsonify({"error": "充值金额须大于 0"}), 400
+        cred.credit_balance += amount
+        log = CreditLog(
+            credential_id=cred.id, event_type="recharge",
+            amount=amount, balance_after=cred.credit_balance,
+            detail=f"手动充值 {amount} 积分",
+        )
+        db.session.add(log)
+        db.session.commit()
+        return jsonify(cred.to_dict())
+
+    @app.route("/api/credits/logs", methods=["GET"])
+    def credit_logs():
+        page = request.args.get("page", 1, type=int)
+        per_page = request.args.get("per_page", 50, type=int)
+        cred_id = request.args.get("credential_id", type=int)
+        q = CreditLog.query.order_by(CreditLog.created_at.desc())
+        if cred_id:
+            q = q.filter_by(credential_id=cred_id)
+        logs = q.limit(per_page).offset((page - 1) * per_page).all()
+        return jsonify([l.to_dict() for l in logs])
+
+    # ---- AI Provider Failover Info ----
+    @app.route("/api/ai/providers", methods=["GET"])
+    def ai_providers():
+        """Return the failover chain with account availability."""
+        chain = []
+        for st in ServiceCredential.AI_FAILOVER_CHAIN:
+            accounts = ServiceCredential.query.filter_by(service_type=st, enabled=True).order_by(
+                ServiceCredential.priority
+            ).all()
+            available = [a for a in accounts if a.credit_balance >= a.credit_threshold]
+            chain.append({
+                "service_type": st,
+                "total_accounts": len(accounts),
+                "available_accounts": len(available),
+                "accounts": [a.to_dict() for a in accounts],
+            })
+        return jsonify(chain)
+
+    # ---- Progress Context ----
+    @app.route("/api/runs/<int:rid>/progress", methods=["GET"])
+    def get_progress(rid):
+        TestRun.query.get_or_404(rid)
+        contexts = ProgressContext.query.filter_by(run_id=rid).order_by(
+            ProgressContext.created_at.desc()
+        ).all()
+        return jsonify([c.to_dict() for c in contexts])
+
+    # ---- Failure Codes ----
+    @app.route("/api/failure-codes", methods=["GET"])
+    def list_failure_codes():
+        return jsonify([{"code": fc.value, "name": fc.name} for fc in FailureCode])
 
     # ---- Health check ----
     @app.route("/health")

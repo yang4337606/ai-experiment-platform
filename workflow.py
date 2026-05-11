@@ -317,19 +317,29 @@ class WorkflowEngine:
     Drives a TestRun through all workflow states in a background thread.
 
     States (in order):
-      pending → init_vm → snapshot → code_pull → upload →
-      install → verify → (ai_analyze → ai_fix → rollback_or_retry)*
-      → success | failed
+      pending -> init_vm -> snapshot -> code_pull -> upload ->
+      install -> verify -> (ai_analyze -> ai_fix -> rollback_or_retry)*
+      -> success | failed
+
+    Features (设计文档 4.4.4):
+      - Credit monitoring & auto account switching
+      - AI provider failover chain (MuleRun -> ChatGPT -> Qwen)
+      - Staged commits (commit after each meaningful fix step)
+      - Failure classification (8 enum codes)
+      - Progress context sync on account switch
+      - Enhanced notifications with failure code & AI summary
     """
 
     STEP_TIMEOUT = 30 * 60      # 30 minutes per step
     TOTAL_TIMEOUT = 4 * 60 * 60 # 4 hours total
+    CREDIT_COST_PER_CALL = 5.0  # simulated credit cost per AI call
 
     def __init__(self, app, run_id: int):
         self.app = app
         self.run_id = run_id
         self._thread = None
         self._start_wall = None
+        self._current_credential = None  # active AI account
 
     # ------------------------------------------------------------------
     # Public interface
@@ -365,7 +375,7 @@ class WorkflowEngine:
         session.commit()
 
     def _fmt(self, template: str, ctx: dict) -> str:
-        """Safe format – unknown keys remain as-is."""
+        """Safe format - unknown keys remain as-is."""
         try:
             return template.format(**ctx)
         except KeyError:
@@ -408,6 +418,151 @@ class WorkflowEngine:
         return time.time() - self._start_wall if self._start_wall else 0
 
     # ------------------------------------------------------------------
+    # Credit monitoring & account pool (设计文档 4.4.4)
+    # ------------------------------------------------------------------
+
+    def _select_ai_account(self, session, run, round_number):
+        """
+        Select the best available AI account following the failover chain.
+        Returns a ServiceCredential or None.
+        """
+        from models import ServiceCredential, CreditLog
+        for service_type in ServiceCredential.AI_FAILOVER_CHAIN:
+            accounts = ServiceCredential.query.filter_by(
+                service_type=service_type, enabled=True
+            ).order_by(ServiceCredential.priority).all()
+            for acct in accounts:
+                if acct.credit_balance >= acct.credit_threshold:
+                    # Check if we're switching from a different account
+                    if self._current_credential and self._current_credential.id != acct.id:
+                        self._add_log(session, run, "ai_analyze",
+                            f"[账户切换] {self._current_credential.service_type}/{self._current_credential.account}"
+                            f" -> {acct.service_type}/{acct.account} (积分不足，自动切换)",
+                            "account_switch", round_number)
+                        # Save progress context for continuity
+                        self._save_progress_context(session, run, round_number,
+                                                    self._current_credential, acct)
+                        # Log the switch event
+                        switch_log = CreditLog(
+                            credential_id=acct.id, run_id=run.id,
+                            event_type="switch",
+                            amount=0, balance_after=acct.credit_balance,
+                            detail=f"从 {self._current_credential.account} 切换到 {acct.account}",
+                        )
+                        session.add(switch_log)
+                        session.commit()
+                    self._current_credential = acct
+                    return acct
+                else:
+                    # Low balance alert
+                    self._add_log(session, run, "ai_analyze",
+                        f"[积分告警] {service_type}/{acct.account} 积分余额 {acct.credit_balance:.1f}"
+                        f" 低于阈值 {acct.credit_threshold:.1f}，跳过",
+                        "credit", round_number)
+        return None
+
+    def _deduct_credit(self, session, run, credential, amount, round_number):
+        """Deduct credits and log the event."""
+        from models import CreditLog
+        credential.credit_balance = max(0, credential.credit_balance - amount)
+        credential.last_used_at = datetime.utcnow()
+        log = CreditLog(
+            credential_id=credential.id, run_id=run.id,
+            event_type="deduct", amount=amount,
+            balance_after=credential.credit_balance,
+            detail=f"第{round_number}轮 AI 调用消耗 {amount} 积分",
+        )
+        session.add(log)
+        session.commit()
+        self._add_log(session, run, "ai_analyze",
+            f"[积分] {credential.service_type}/{credential.account} "
+            f"消耗 {amount} 积分，剩余 {credential.credit_balance:.1f}",
+            "credit", round_number)
+
+    def _save_progress_context(self, session, run, round_number, from_cred, to_cred):
+        """Save conversation context when switching accounts (进度同步机制)."""
+        from models import ProgressContext, AIAnalysis
+        # Gather completed analyses as context
+        analyses = AIAnalysis.query.filter_by(run_id=run.id).order_by(
+            AIAnalysis.round_number
+        ).all()
+        completed_steps = []
+        pending_issues = []
+        for a in analyses:
+            completed_steps.append(f"第{a.round_number}轮: {(a.root_cause or '').split(chr(10))[0]}")
+        pending_issues.append(f"当前第{round_number}轮验证失败，需继续分析修复")
+        project_name = run.project.name if run.project else "unknown"
+        task_summary = (
+            f"项目 [{project_name}] 自动化测试运行 #{run.id}，"
+            f"当前第{round_number}轮，已完成{len(analyses)}次AI分析修复"
+        )
+        context_prompt = (
+            f"你正在接手一个自动化测试修复任务。\n"
+            f"项目: {project_name}\n"
+            f"运行ID: #{run.id}\n"
+            f"当前轮次: 第{round_number}轮\n"
+            f"已完成步骤:\n" +
+            "\n".join(f"  - {s}" for s in completed_steps) +
+            f"\n待处理:\n" +
+            "\n".join(f"  - {p}" for p in pending_issues) +
+            f"\n请继续分析当前轮次的验证失败日志并提供修复方案。"
+        )
+        ctx = ProgressContext(
+            run_id=run.id,
+            round_number=round_number,
+            from_credential_id=from_cred.id if from_cred else None,
+            to_credential_id=to_cred.id if to_cred else None,
+            task_summary=task_summary,
+            completed_steps=completed_steps,
+            pending_issues=pending_issues,
+            context_prompt=context_prompt,
+        )
+        session.add(ctx)
+        session.commit()
+
+    # ------------------------------------------------------------------
+    # Notification helper (设计文档 4.6 增强)
+    # ------------------------------------------------------------------
+
+    def _send_notification(self, session, run, final_status, all_analyses, last_scenario=None):
+        """Build and log enhanced notification with failure code + AI summary."""
+        from models import NotifyConfig
+        cfg = NotifyConfig.query.first()
+        if not cfg or not cfg.enabled or not cfg.webhook_url:
+            return
+        project_name = run.project.name if run.project else "unknown"
+        if final_status == "success" and not cfg.notify_on_success:
+            return
+        if final_status == "failed" and not cfg.notify_on_failure:
+            return
+
+        # Build notification payload
+        if final_status == "success":
+            msg = (
+                f"[测试成功] {project_name} 运行 #{run.id}\n"
+                f"分支: {run.branch_name or 'main'}\n"
+                f"重试轮次: {run.current_retry}\n"
+                f"AI 修复: {len(all_analyses)} 次"
+            )
+        else:
+            failure_code = run.failure_code or "UNKNOWN_ERROR"
+            last_analysis = all_analyses[-1] if all_analyses else None
+            ai_summary = ""
+            if last_analysis:
+                ai_summary = f"\nAI 分析: {(last_analysis.root_cause or '').split(chr(10))[0]}"
+            msg = (
+                f"[测试失败] {project_name} 运行 #{run.id}\n"
+                f"失败分类: {failure_code}\n"
+                f"重试轮次: {run.current_retry}/{run.retry_count}\n"
+                f"分支: {run.branch_name or 'main'}"
+                f"{ai_summary}"
+            )
+        # Log notification (simulated send)
+        self._add_log(session, run, "notify",
+            f"[通知] 发送微信通知至 {cfg.webhook_url}\n{msg}",
+            "install", run.current_retry or 1)
+
+    # ------------------------------------------------------------------
     # State machine steps
     # ------------------------------------------------------------------
 
@@ -435,7 +590,6 @@ class WorkflowEngine:
     def _step_install(self, session, run, ctx, round_number=1):
         self._set_status(session, run, "install")
         _rnd(1.5, 3.0)
-        # Pick install template based on project name heuristic
         project = (run.project.name if run.project else "").lower()
         if "java" in project or "spring" in project:
             templates = _INSTALL_LOGS_JAVA
@@ -444,29 +598,22 @@ class WorkflowEngine:
         else:
             templates = _INSTALL_LOGS_PYTHON
         self._emit_logs(session, run, templates, "install", "install", ctx, round_number)
-        # Add final status line
         _rnd(0.5, 1.0)
         self._add_log(session, run, "install", f"[安装] 第 {round_number} 轮安装完成", "install", round_number)
 
     def _step_verify(self, session, run, ctx, round_number=1, force_fail_scenario=None):
-        """
-        Returns (passed: bool, scenario: dict|None).
-        Fails on first 1-2 attempts randomly; passes after AI fix.
-        """
+        """Returns (passed: bool, scenario: dict|None)."""
         self._set_status(session, run, "verify")
         _rnd(1.0, 2.0)
 
         if force_fail_scenario is not None:
-            # Use the same scenario for consistency
             scenario_key = force_fail_scenario["type"]
         else:
             scenario_key = None
 
-        # Decide whether to fail this round
         should_fail = (round_number <= random.randint(1, 2)) and (run.current_retry < run.retry_count)
 
         if should_fail:
-            # Pick a random failure scenario
             scenario = random.choice(_FAILURE_SCENARIOS)
             if scenario["type"] == "port_conflict":
                 fail_logs = _VERIFY_FAIL_LOGS_PORT
@@ -481,9 +628,21 @@ class WorkflowEngine:
             return True, None
 
     def _step_ai_analyze(self, session, run, scenario: dict, round_number: int):
-        from models import AIAnalysis, RunLog
+        """AI analysis with credit monitoring & failover chain."""
+        from models import AIAnalysis, FailureCode
         self._set_status(session, run, "ai_analyze")
         _rnd(1.5, 2.5)
+
+        # --- Credit check & account selection ---
+        acct = self._select_ai_account(session, run, round_number)
+        if acct:
+            self._add_log(session, run, "ai_analyze",
+                f"[AI分析] 使用 {acct.service_type}/{acct.account} (积分: {acct.credit_balance:.1f})",
+                "ai_analysis", round_number)
+        else:
+            self._add_log(session, run, "ai_analyze",
+                "[AI分析] 警告: 所有 AI 账户积分不足或不可用，使用内置分析",
+                "ai_analysis", round_number)
 
         # Log the AI analysis process
         analysis_log_lines = [
@@ -496,7 +655,19 @@ class WorkflowEngine:
             self._add_log(session, run, "ai_analyze", line, "ai_analysis", round_number)
             _rnd(0.1, 0.3)
 
-        _rnd(1.0, 2.0)  # simulate LLM call latency
+        _rnd(1.0, 2.0)
+
+        # --- Deduct credits ---
+        if acct:
+            self._deduct_credit(session, run, acct, self.CREDIT_COST_PER_CALL, round_number)
+
+        # --- Classify failure ---
+        failure_code = FailureCode.from_scenario_type(scenario["type"])
+        run.failure_code = failure_code.value
+        session.commit()
+        self._add_log(session, run, "ai_analyze",
+            f"[AI分析] 失败分类: {failure_code.value} ({failure_code.name})",
+            "ai_analysis", round_number)
 
         # Build commit message
         commit_msg = (
@@ -522,32 +693,45 @@ class WorkflowEngine:
         return analysis
 
     def _step_ai_fix(self, session, run, scenario: dict, analysis, round_number: int, ctx: dict):
+        """AI fix with staged commits (阶段性提交)."""
         self._set_status(session, run, "ai_fix")
         _rnd(1.0, 2.0)
 
+        fix_branch = f"fix/auto-repair-{ctx['project']}-{int(time.time())}"
         fix_log_lines = [
             f"[AI修复] 根据分析结果，开始自动修复 (第 {round_number} 轮)...",
-            f"[AI修复] 创建修复分支: fix/auto-repair-{ctx['project']}-{int(time.time())}",
+            f"[AI修复] 创建修复分支: {fix_branch}",
             "[AI修复] 正在应用代码变更...",
         ]
-        for f in scenario["files"]:
-            fix_log_lines.append(f"[AI修复]   修改文件: {f}")
-        fix_log_lines += [
-            "[AI修复] 代码变更已应用",
-            f"[AI修复] 提交变更: {analysis.commit_message.splitlines()[0]}",
+        for line in fix_log_lines:
+            self._add_log(session, run, "ai_fix", line, "ai_fix", round_number)
+            _rnd(0.05, 0.15)
+
+        # --- Staged commits: commit per file (阶段性提交策略) ---
+        for i, f in enumerate(scenario["files"]):
+            self._add_log(session, run, "ai_fix",
+                f"[AI修复]   修改文件: {f}", "ai_fix", round_number)
+            _rnd(0.1, 0.2)
+            staged_hash = f"{random.randint(0x1000000, 0xfffffff):07x}"
+            self._add_log(session, run, "ai_fix",
+                f"[AI修复]   阶段性提交 ({i+1}/{len(scenario['files'])}): "
+                f"git commit -m '[AI-FIX] 修改 {f}' -> {staged_hash}",
+                "ai_fix", round_number)
+            _rnd(0.05, 0.1)
+
+        final_lines = [
+            "[AI修复] 所有文件修改已逐步提交 (Staged Commit)",
+            f"[AI修复] 合并提交: {analysis.commit_message.splitlines()[0]}",
             f"[AI修复] Commit hash: {ctx['commit_hash']}",
             "[AI修复] 推送修复分支到远程仓库...",
             "[AI修复] 修复分支已推送，准备重新安装验证",
         ]
-
-        # Update run branch_name
-        fix_branch = f"fix/auto-repair-{ctx['project']}-{int(time.time())}"
-        run.branch_name = fix_branch
-        session.commit()
-
-        for line in fix_log_lines:
+        for line in final_lines:
             self._add_log(session, run, "ai_fix", line, "ai_fix", round_number)
             _rnd(0.05, 0.15)
+
+        run.branch_name = fix_branch
+        session.commit()
 
     def _step_rollback(self, session, run, ctx):
         self._set_status(session, run, "rollback")
@@ -564,12 +748,8 @@ class WorkflowEngine:
         if passed:
             for check in checks:
                 vr = VerifyResult(
-                    run_id=run.id,
-                    round_number=round_number,
-                    check_name=check,
-                    passed=True,
-                    detail="检查通过",
-                    created_at=datetime.utcnow(),
+                    run_id=run.id, round_number=round_number, check_name=check,
+                    passed=True, detail="检查通过", created_at=datetime.utcnow(),
                 )
                 session.add(vr)
         else:
@@ -592,15 +772,14 @@ class WorkflowEngine:
         session.commit()
 
     # ------------------------------------------------------------------
-    # Report generation
+    # Report generation (with failure_code)
     # ------------------------------------------------------------------
 
     def _generate_report(self, session, run, final_status: str, all_analyses):
         from models import TestReport, VerifyResult
         if run.report:
-            return  # already generated
+            return
 
-        # Collect the last round's verify results
         last_round = run.current_retry
         vr_list = session.query(VerifyResult).filter_by(run_id=run.id, round_number=last_round).all()
         vr_dict = {v.check_name: {"passed": v.passed, "detail": v.detail} for v in vr_list}
@@ -624,6 +803,7 @@ class WorkflowEngine:
             for a in all_analyses
         ]
 
+        failure_code = run.failure_code or ""
         if final_status == "success":
             summary = (
                 f"测试运行成功完成。\n"
@@ -633,6 +813,7 @@ class WorkflowEngine:
         else:
             summary = (
                 f"测试运行失败。\n"
+                f"失败分类: {failure_code}\n"
                 f"共尝试 {run.current_retry} 轮，AI 分析了 {len(all_analyses)} 个问题但修复未能解决所有验证失败项。\n"
                 f"已回滚虚拟机至初始快照状态，请人工介入排查。"
             )
@@ -659,7 +840,7 @@ class WorkflowEngine:
 
     def _run(self):
         with self.app.app_context():
-            from models import db, TestRun
+            from models import db, TestRun, FailureCode
             session = db.session
             self._start_wall = time.time()
 
@@ -703,13 +884,15 @@ class WorkflowEngine:
 
                     if passed:
                         # SUCCESS path
+                        run.failure_code = ""
                         self._generate_report(session, run, "success", all_analyses)
                         run.status = "success"
                         run.end_time = datetime.utcnow()
                         session.commit()
+                        self._send_notification(session, run, "success", all_analyses)
                         return
 
-                    # Verify failed – AI analyze & fix loop
+                    # Verify failed - AI analyze & fix loop
                     last_scenario = scenario
                     analysis = self._step_ai_analyze(session, run, scenario, round_number)
                     all_analyses.append(analysis)
@@ -719,21 +902,27 @@ class WorkflowEngine:
                     if round_number > run.retry_count:
                         break
 
-                # Exhausted retries → rollback & fail
+                # Exhausted retries -> rollback & fail
+                run.failure_code = FailureCode.AI_FIX_FAILED.value
                 self._step_rollback(session, run, ctx)
                 self._generate_report(session, run, "failed", all_analyses)
                 run.status = "failed"
                 run.end_time = datetime.utcnow()
                 session.commit()
+                self._send_notification(session, run, "failed", all_analyses, last_scenario)
 
             except TimeoutError as e:
                 run.status = "failed"
+                run.failure_code = FailureCode.ENV_ERROR.value
                 run.end_time = datetime.utcnow()
                 self._add_log(session, run, "system", f"[超时] {e}", "install", run.current_retry or 1)
                 session.commit()
+                self._send_notification(session, run, "failed", all_analyses)
             except Exception as e:
                 run.status = "failed"
+                run.failure_code = FailureCode.UNKNOWN_ERROR.value
                 run.end_time = datetime.utcnow()
                 self._add_log(session, run, "system", f"[系统错误] {e}", "install", run.current_retry or 1)
                 session.commit()
+                self._send_notification(session, run, "failed", all_analyses)
                 raise

@@ -62,11 +62,36 @@ class RunStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class FailureCode(str, enum.Enum):
+    """设计文档 7.2 节 – 失败分类枚举"""
+    ENV_ERROR = "ENV_ERROR"              # 环境问题（VM/磁盘/系统配置）
+    SCRIPT_ERROR = "SCRIPT_ERROR"        # 脚本问题（语法/权限/路径）
+    PACKAGE_ERROR = "PACKAGE_ERROR"      # 安装包问题（损坏/版本/依赖缺失）
+    NETWORK_ERROR = "NETWORK_ERROR"      # 网络问题（下载超时/DNS）
+    CONFIG_ERROR = "CONFIG_ERROR"        # 配置问题（配置文件/端口冲突/参数）
+    SERVICE_ERROR = "SERVICE_ERROR"      # 服务启动失败
+    AI_FIX_FAILED = "AI_FIX_FAILED"    # AI 修复失败（达到重试上限）
+    UNKNOWN_ERROR = "UNKNOWN_ERROR"      # 未知错误
+
+    @classmethod
+    def from_scenario_type(cls, scenario_type: str):
+        """Map workflow scenario type to FailureCode."""
+        mapping = {
+            "port_conflict": cls.CONFIG_ERROR,
+            "missing_dependency": cls.PACKAGE_ERROR,
+            "permission_error": cls.SCRIPT_ERROR,
+            "config_error": cls.CONFIG_ERROR,
+        }
+        return mapping.get(scenario_type, cls.UNKNOWN_ERROR)
+
+
 class LogType(str, enum.Enum):
     INSTALL = "install"
     VERIFY = "verify"
     AI_ANALYSIS = "ai_analysis"
     AI_FIX = "ai_fix"
+    CREDIT = "credit"          # 积分相关日志
+    ACCOUNT_SWITCH = "account_switch"  # 账户切换日志
 
 
 class Project(db.Model):
@@ -105,6 +130,7 @@ class TestRun(db.Model):
     end_time = db.Column(db.DateTime)
     retry_count = db.Column(db.Integer, default=10)       # max retries allowed
     current_retry = db.Column(db.Integer, default=0)      # retries used so far
+    failure_code = db.Column(db.String(32), default="")    # FailureCode enum value
     vm_info = db.Column(db.JSON, default=dict)            # ip, hostname, specs
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -119,6 +145,7 @@ class TestRun(db.Model):
             "project_id": self.project_id,
             "project_name": self.project.name if self.project else None,
             "status": self.status,
+            "failure_code": self.failure_code or "",
             "branch_name": self.branch_name,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "end_time": self.end_time.isoformat() if self.end_time else None,
@@ -234,21 +261,35 @@ class TestReport(db.Model):
 
 
 class ServiceCredential(db.Model):
-    """Stores encrypted credentials for third-party services (GitHub / MuleRun / ChatGPT)."""
+    """Account pool – multiple accounts per service type with priority & credits."""
     __tablename__ = "service_credential"
 
     id = db.Column(db.Integer, primary_key=True)
-    service_type = db.Column(db.String(32), nullable=False, unique=True)   # github | mulerun | chatgpt
-    account = db.Column(db.String(256), default="")                        # username / email (plain)
-    encrypted_secret = db.Column(db.Text, default="")                      # password / token (encrypted)
-    extra = db.Column(db.JSON, default=dict)                               # any extra fields (e.g. api_base)
+    service_type = db.Column(db.String(32), nullable=False, index=True)    # github | mulerun | chatgpt | qwen
+    account = db.Column(db.String(256), default="")                        # username / email
+    encrypted_secret = db.Column(db.Text, default="")                      # password / token (Fernet encrypted)
+    priority = db.Column(db.Integer, default=0)                            # lower = higher priority
+    credit_balance = db.Column(db.Float, default=0.0)                      # current credit balance
+    credit_threshold = db.Column(db.Float, default=10.0)                   # switch when balance < threshold
+    extra = db.Column(db.JSON, default=dict)                               # api_base, model, etc.
     enabled = db.Column(db.Boolean, default=True)
+    last_used_at = db.Column(db.DateTime)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    SERVICE_TYPES = ("github", "mulerun", "chatgpt")
+    SERVICE_TYPES = ("github", "mulerun", "chatgpt", "qwen")
+    # Failover chain for AI providers (设计文档 4.4.4)
+    AI_FAILOVER_CHAIN = ("mulerun", "chatgpt", "qwen")
+
+    def _mask_secret(self) -> str:
+        if not self.encrypted_secret:
+            return ""
+        try:
+            raw = decrypt_value(self.encrypted_secret)
+            return "••••••••" + raw[-4:] if len(raw) > 4 else "••••"
+        except Exception:
+            return "••••"
 
     def to_dict(self, unmask=False):
-        """Return a dict. Secrets are masked unless *unmask* is True."""
         secret = ""
         if self.encrypted_secret:
             if unmask:
@@ -257,20 +298,77 @@ class ServiceCredential(db.Model):
                 except Exception:
                     secret = ""
             else:
-                # Show only last 4 chars
-                try:
-                    raw = decrypt_value(self.encrypted_secret)
-                    secret = "••••••••" + raw[-4:] if len(raw) > 4 else "••••"
-                except Exception:
-                    secret = "••••"
+                secret = self._mask_secret()
         return {
             "id": self.id,
             "service_type": self.service_type,
             "account": self.account or "",
             "secret_masked": secret,
+            "priority": self.priority,
+            "credit_balance": self.credit_balance,
+            "credit_threshold": self.credit_threshold,
             "extra": self.extra or {},
             "enabled": self.enabled,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class CreditLog(db.Model):
+    """Tracks credit consumption and account switching events."""
+    __tablename__ = "credit_log"
+
+    id = db.Column(db.Integer, primary_key=True)
+    credential_id = db.Column(db.Integer, db.ForeignKey("service_credential.id"), nullable=False)
+    run_id = db.Column(db.Integer, db.ForeignKey("test_run.id"), nullable=True)
+    event_type = db.Column(db.String(32))   # deduct | switch | alert | recharge
+    amount = db.Column(db.Float, default=0.0)
+    balance_after = db.Column(db.Float, default=0.0)
+    detail = db.Column(db.Text, default="")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    credential = db.relationship("ServiceCredential", backref="credit_logs")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "credential_id": self.credential_id,
+            "run_id": self.run_id,
+            "event_type": self.event_type,
+            "amount": self.amount,
+            "balance_after": self.balance_after,
+            "detail": self.detail,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class ProgressContext(db.Model):
+    """Stores AI conversation context for progress sync when switching accounts."""
+    __tablename__ = "progress_context"
+
+    id = db.Column(db.Integer, primary_key=True)
+    run_id = db.Column(db.Integer, db.ForeignKey("test_run.id"), nullable=False)
+    round_number = db.Column(db.Integer, default=1)
+    from_credential_id = db.Column(db.Integer)    # account switched FROM
+    to_credential_id = db.Column(db.Integer)      # account switched TO
+    task_summary = db.Column(db.Text, default="") # current task description
+    completed_steps = db.Column(db.JSON, default=list)  # steps done so far
+    pending_issues = db.Column(db.JSON, default=list)   # issues remaining
+    context_prompt = db.Column(db.Text, default="")     # generated prompt for new session
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "run_id": self.run_id,
+            "round_number": self.round_number,
+            "from_credential_id": self.from_credential_id,
+            "to_credential_id": self.to_credential_id,
+            "task_summary": self.task_summary,
+            "completed_steps": self.completed_steps or [],
+            "pending_issues": self.pending_issues or [],
+            "context_prompt": self.context_prompt,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
 
