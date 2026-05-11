@@ -728,9 +728,12 @@ def _register_routes(app):
         data = request.get_json(force=True)
         for field in ["vmrun_path", "vmware_host_type", "default_template_dir",
                        "default_clone_dir", "default_snapshot_name",
-                       "ssh_user", "ssh_key_path", "ssh_timeout", "simulation"]:
+                       "ssh_user", "ssh_port", "ssh_key_path", "ssh_timeout", "simulation"]:
             if field in data:
                 setattr(cfg, field, data[field])
+        # Encrypt password if provided (non-empty means user updated it)
+        if data.get("ssh_password"):
+            cfg.ssh_password = encrypt_value(data["ssh_password"])
         db.session.commit()
         # Reset singleton so next workflow picks up new config
         import vmware_manager as _vm

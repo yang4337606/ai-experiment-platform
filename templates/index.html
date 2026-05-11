@@ -1095,8 +1095,12 @@ const App = {
               <input class="form-input" id="vm-snapshot-name" value="${this.escHtml(cfg.default_snapshot_name||'clean-snapshot')}"></div>
             <div class="form-group"><label class="form-label">SSH 用户名</label>
               <input class="form-input" id="vm-ssh-user" value="${this.escHtml(cfg.ssh_user||'root')}"></div>
+            <div class="form-group"><label class="form-label">SSH 密码</label>
+              <input class="form-input" id="vm-ssh-password" type="password" value="" placeholder="${cfg.ssh_password_set?'已设置 (留空不修改)':'输入 root 密码'}"></div>
+            <div class="form-group"><label class="form-label">SSH 端口</label>
+              <input class="form-input" id="vm-ssh-port" type="number" value="${cfg.ssh_port||22}" placeholder="默认 22"></div>
             <div class="form-group"><label class="form-label">SSH 密钥路径</label>
-              <input class="form-input" id="vm-ssh-key" value="${this.escHtml(cfg.ssh_key_path||'')}" placeholder="如 ~/.ssh/id_rsa"></div>
+              <input class="form-input" id="vm-ssh-key" value="${this.escHtml(cfg.ssh_key_path||'')}" placeholder="留空则使用密码认证"></div>
             <div class="form-group"><label class="form-label">SSH 超时 (秒)</label>
               <input class="form-input" id="vm-ssh-timeout" type="number" value="${cfg.ssh_timeout||120}"></div>
           </div>
@@ -1119,7 +1123,7 @@ const App = {
         <table class="data-table"><thead><tr>
           <th>名称</th><th>操作系统</th><th>CPU</th><th>内存</th><th>磁盘</th><th>VMX 路径</th>
         </tr></thead><tbody>${tplRows}</tbody></table>` :
-        `<div class="empty-state" style="padding:24px"><p>暂无模板。请在模板目录中放置 .vmx 文件。</p></div>`}
+        `<div class="empty-state" style="padding:24px"><p>暂无模板。请在模板目录中放置 .vmx 文件。</p>${cfg.default_template_dir ? `<p style="font-size:12px;color:var(--text-muted);margin-top:8px">当前模板目录: <code style="background:var(--bg-elevated);padding:2px 6px;border-radius:4px">${this.escHtml(cfg.default_template_dir)}</code></p>` : `<p style="font-size:12px;color:var(--accent-yellow);margin-top:8px">尚未配置模板目录，请先在上方填写「模板目录」路径并保存。</p>`}</div>`}
       </div>
 
       <!-- Running VMs -->
@@ -1144,10 +1148,13 @@ const App = {
       default_clone_dir: document.getElementById('vm-clone-dir').value,
       default_snapshot_name: document.getElementById('vm-snapshot-name').value,
       ssh_user: document.getElementById('vm-ssh-user').value,
+      ssh_port: parseInt(document.getElementById('vm-ssh-port').value) || 22,
       ssh_key_path: document.getElementById('vm-ssh-key').value,
       ssh_timeout: parseInt(document.getElementById('vm-ssh-timeout').value) || 120,
       simulation: document.getElementById('vm-simulation').checked,
     };
+    const pw = document.getElementById('vm-ssh-password').value;
+    if (pw) data.ssh_password = pw;
     await this.api.put('/api/vmware/config', data);
     this.toast('VMware 配置已保存', 'success');
     this.loadVMware();

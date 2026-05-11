@@ -43,6 +43,8 @@ class VMwareConfig:
     default_clone_dir: str = ""           # where cloned VMs are stored
     default_snapshot_name: str = "clean-snapshot"
     ssh_user: str = "root"
+    ssh_password: str = ""                # password for SSH auth (used when no key)
+    ssh_port: int = 22                    # SSH port on guest
     ssh_key_path: str = ""                # path to private key for guest SSH
     ssh_timeout: int = 120                # seconds to wait for SSH ready
     simulation: bool = False              # force simulation mode
@@ -467,22 +469,38 @@ class VMwareManager:
 
     # --- SSH remote execution (alternative to vmrun guest ops) ---
 
+    def _ssh_common_opts(self) -> list:
+        """Build common SSH options (port, host-key, timeout)."""
+        opts = [
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ConnectTimeout=10",
+        ]
+        port = self.config.ssh_port or 22
+        if port != 22:
+            opts.extend(["-p", str(port)])
+        if self.config.ssh_key_path:
+            opts.extend(["-i", self.config.ssh_key_path])
+        return opts
+
+    def _wrap_sshpass(self, cmd: list) -> list:
+        """Prepend sshpass if password auth is configured and no key is set."""
+        if self.config.ssh_password and not self.config.ssh_key_path:
+            return ["sshpass", "-p", self.config.ssh_password] + cmd
+        return cmd
+
     def ssh_exec(self, info: VMInfo, command: str, timeout: int = 300) -> tuple:
         """Execute a command via SSH. Returns (returncode, stdout, stderr)."""
         if self._simulation:
             log.info("[SIM] SSH exec on %s: %s", info.name, command[:80])
             return (0, "[SIM] OK", "")
 
-        ssh_cmd = ["ssh"]
-        if self.config.ssh_key_path:
-            ssh_cmd.extend(["-i", self.config.ssh_key_path])
-        ssh_cmd.extend([
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", f"ConnectTimeout=10",
-            f"{self.config.ssh_user}@{info.ip}",
-            command
-        ])
+        ssh_cmd = self._wrap_sshpass(
+            ["ssh"] + self._ssh_common_opts() + [
+                f"{self.config.ssh_user}@{info.ip}",
+                command,
+            ]
+        )
         try:
             result = subprocess.run(
                 ssh_cmd, capture_output=True, text=True, timeout=timeout,
@@ -498,12 +516,20 @@ class VMwareManager:
             log.info("[SIM] SCP upload %s -> %s:%s", local_path, info.ip, remote_path)
             return
 
-        scp_cmd = ["scp", "-r",
-                    "-o", "StrictHostKeyChecking=no",
-                    "-o", "UserKnownHostsFile=/dev/null"]
+        port = self.config.ssh_port or 22
+        scp_opts = [
+            "-r",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+        ]
+        if port != 22:
+            scp_opts.extend(["-P", str(port)])
         if self.config.ssh_key_path:
-            scp_cmd.extend(["-i", self.config.ssh_key_path])
-        scp_cmd.extend([local_path, f"{self.config.ssh_user}@{info.ip}:{remote_path}"])
+            scp_opts.extend(["-i", self.config.ssh_key_path])
+
+        scp_cmd = self._wrap_sshpass(["scp"] + scp_opts + [
+            local_path, f"{self.config.ssh_user}@{info.ip}:{remote_path}"
+        ])
         subprocess.run(scp_cmd, capture_output=True, text=True, timeout=120, check=True,
                        encoding="utf-8", errors="replace")
 

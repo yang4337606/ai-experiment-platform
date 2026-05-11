@@ -274,7 +274,7 @@ class ServiceCredential(db.Model):
     extra = db.Column(db.JSON, default=dict)                               # api_base, model, etc.
     enabled = db.Column(db.Boolean, default=True)
     last_used_at = db.Column(db.DateTime)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     SERVICE_TYPES = ("github", "mulerun", "chatgpt", "qwen")
     # Failover chain for AI providers (设计文档 4.4.4)
@@ -383,10 +383,12 @@ class VMwareConfigModel(db.Model):
     default_clone_dir = db.Column(db.String(512), default="")
     default_snapshot_name = db.Column(db.String(128), default="clean-snapshot")
     ssh_user = db.Column(db.String(64), default="root")
+    ssh_password = db.Column(db.String(512), default="")              # SSH password (encrypted)
+    ssh_port = db.Column(db.Integer, default=22)                      # SSH port
     ssh_key_path = db.Column(db.String(512), default="")
     ssh_timeout = db.Column(db.Integer, default=120)
     simulation = db.Column(db.Boolean, default=True)                  # default to simulation
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
         return {
@@ -397,6 +399,8 @@ class VMwareConfigModel(db.Model):
             "default_clone_dir": self.default_clone_dir,
             "default_snapshot_name": self.default_snapshot_name,
             "ssh_user": self.ssh_user,
+            "ssh_password_set": bool(self.ssh_password),   # never expose raw password
+            "ssh_port": self.ssh_port or 22,
             "ssh_key_path": self.ssh_key_path,
             "ssh_timeout": self.ssh_timeout,
             "simulation": self.simulation,
@@ -406,6 +410,12 @@ class VMwareConfigModel(db.Model):
     def to_vmware_config(self):
         """Convert to vmware_manager.VMwareConfig dataclass."""
         from vmware_manager import VMwareConfig
+        password = ""
+        if self.ssh_password:
+            try:
+                password = decrypt_value(self.ssh_password)
+            except Exception:
+                password = ""
         return VMwareConfig(
             vmrun_path=self.vmrun_path or "",
             vmware_host_type=self.vmware_host_type or "ws",
@@ -413,6 +423,8 @@ class VMwareConfigModel(db.Model):
             default_clone_dir=self.default_clone_dir or "",
             default_snapshot_name=self.default_snapshot_name or "clean-snapshot",
             ssh_user=self.ssh_user or "root",
+            ssh_password=password,
+            ssh_port=self.ssh_port or 22,
             ssh_key_path=self.ssh_key_path or "",
             ssh_timeout=self.ssh_timeout or 120,
             simulation=self.simulation if self.simulation is not None else True,
