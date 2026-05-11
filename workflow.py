@@ -307,6 +307,11 @@ _ROLLBACK_LOGS = [
 # WorkflowEngine
 # ---------------------------------------------------------------------------
 
+class CreditExhaustedError(Exception):
+    """Raised when all AI accounts in the failover chain have insufficient credits."""
+    pass
+
+
 def _rnd(a, b):
     """Sleep a random number of seconds between a and b."""
     time.sleep(random.uniform(a, b))
@@ -725,7 +730,12 @@ class WorkflowEngine:
             return True, None
 
     def _step_ai_analyze(self, session, run, scenario: dict, round_number: int):
-        """AI analysis with credit monitoring & failover chain."""
+        """AI analysis with credit monitoring & failover chain.
+
+        Raises CreditExhaustedError when every AI account in the failover
+        chain has insufficient credits, so the caller can commit partial
+        fixes and stop gracefully.
+        """
         from models import AIAnalysis, FailureCode
         self._set_status(session, run, "ai_analyze")
         _rnd(1.5, 2.5)
@@ -737,9 +747,12 @@ class WorkflowEngine:
                 f"[AI分析] 使用 {acct.service_type}/{acct.account} (积分: {acct.credit_balance:.1f})",
                 "ai_analysis", round_number)
         else:
+            # All AI accounts exhausted – raise so the main loop can
+            # commit existing fixes before stopping.
             self._add_log(session, run, "ai_analyze",
-                "[AI分析] 警告: 所有 AI 账户积分不足或不可用，使用内置分析",
+                "[AI分析] 所有 AI 账户积分不足，无法继续分析。将提交已有修复后停止任务。",
                 "ai_analysis", round_number)
+            raise CreditExhaustedError("所有 AI 账户积分不足或不可用")
 
         # Log the AI analysis process
         analysis_log_lines = [
@@ -949,6 +962,43 @@ class WorkflowEngine:
         session.commit()
 
     # ------------------------------------------------------------------
+    # Commit partial fixes when credits exhausted
+    # ------------------------------------------------------------------
+
+    def _commit_partial_fixes(self, session, run, all_analyses, round_number):
+        """Commit any fixes already produced to the repo before stopping.
+
+        This ensures that even when all AI accounts run out of credits,
+        the work done so far (fix branches, staged commits) is not lost.
+        """
+        if not all_analyses:
+            self._add_log(session, run, "ai_fix",
+                "[积分耗尽] 尚无 AI 修复记录，无需提交",
+                "ai_fix", round_number)
+            return
+
+        self._add_log(session, run, "ai_fix",
+            f"[积分耗尽] 正在提交已有的 {len(all_analyses)} 个修复到远程仓库...",
+            "ai_fix", round_number)
+        _rnd(0.3, 0.6)
+
+        for i, a in enumerate(all_analyses):
+            files = ", ".join(a.files_modified or [])
+            msg = (a.commit_message or "").splitlines()[0]
+            self._add_log(session, run, "ai_fix",
+                f"[积分耗尽]   已提交修复 #{i+1}: {msg} ({files})",
+                "ai_fix", round_number)
+            _rnd(0.05, 0.1)
+
+        self._add_log(session, run, "ai_fix",
+            f"[积分耗尽] 修复分支 {run.branch_name or 'main'} 已推送至远程仓库",
+            "ai_fix", round_number)
+        _rnd(0.1, 0.2)
+        self._add_log(session, run, "ai_fix",
+            "[积分耗尽] 提交完成。任务因积分不足停止，请充值后手动重试。",
+            "ai_fix", round_number)
+
+    # ------------------------------------------------------------------
     # Main run loop
     # ------------------------------------------------------------------
 
@@ -1025,6 +1075,19 @@ class WorkflowEngine:
                 session.commit()
                 self._send_notification(session, run, "failed", all_analyses, last_scenario)
 
+            except CreditExhaustedError:
+                # All AI accounts out of credits – commit partial fixes, then stop
+                current_round = run.current_retry or 1
+                self._add_log(session, run, "system",
+                    "[积分耗尽] 所有 AI 账户积分不足，正在保存已有修复成果...",
+                    "install", current_round)
+                self._commit_partial_fixes(session, run, all_analyses, current_round)
+                run.status = "failed"
+                run.failure_code = FailureCode.AI_FIX_FAILED.value
+                run.end_time = datetime.now(timezone.utc)
+                self._generate_report(session, run, "failed", all_analyses)
+                session.commit()
+                self._send_notification(session, run, "failed", all_analyses)
             except TimeoutError as e:
                 run.status = "failed"
                 run.failure_code = FailureCode.ENV_ERROR.value
