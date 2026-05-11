@@ -717,4 +717,4 @@ def _register_routes(app):
 
 if __name__ == "__main__":
     application = create_app()
-    application.run(host="0.0.0.0", port=3000, debug=False)
+    application.run(host="0.0.0.0", port=5002, debug=False)
