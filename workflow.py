@@ -583,6 +583,169 @@ class WorkflowEngine:
             "install", run.current_retry or 1)
 
     # ------------------------------------------------------------------
+    # Real execution helpers (SSH-based)
+    # ------------------------------------------------------------------
+
+    def _real_clone_repo(self, session, run, round_number):
+        """Clone the project repo onto the VM via SSH."""
+        if not self._vm_manager or self._vm_manager.is_simulation:
+            return True
+        if not self._vm_info or not run.project:
+            return False
+
+        config = run.project.config or {}
+        work_dir = config.get("work_dir", "/opt/workspace")
+        repo_url = run.project.repo_url
+        branch = run.branch_name or "main"
+
+        cmds = [
+            f"mkdir -p {work_dir}",
+            f"cd {work_dir} && git clone {repo_url} --branch {branch} --depth 1 _project 2>&1",
+        ]
+        for cmd in cmds:
+            rc, stdout, stderr = self._vm_manager.ssh_exec(self._vm_info, cmd)
+            self._add_log(session, run, "code_pull",
+                f"[代码拉取] $ {cmd}\n{stdout}{stderr}".strip(),
+                "install", round_number)
+            if rc != 0:
+                self._add_log(session, run, "code_pull",
+                    f"[代码拉取] 命令失败 (exit code: {rc})", "install", round_number)
+                return False
+        return True
+
+    def _real_execute_script(self, session, run, round_number):
+        """Execute the install script on the VM via SSH."""
+        if not self._vm_manager or self._vm_manager.is_simulation:
+            return True, ""
+        if not self._vm_info or not run.project:
+            return False, "missing VM info or project"
+
+        config = run.project.config or {}
+        work_dir = config.get("work_dir", "/opt/workspace")
+        script_path = run.project.install_script or ""
+        script_args = config.get("script_args", "")
+        timeout = config.get("timeout", 3600)
+        run_as = config.get("run_as", "root")
+
+        if not script_path:
+            return False, "未配置脚本路径"
+
+        full_script_path = f"{work_dir}/_project/{script_path}"
+        cmd = f"cd {work_dir}/_project && chmod +x {script_path} && bash {script_path} {script_args}"
+
+        self._add_log(session, run, "install",
+            f"[安装] 执行命令: {cmd}", "install", round_number)
+
+        rc, stdout, stderr = self._vm_manager.ssh_exec(self._vm_info, cmd, timeout=timeout)
+
+        # Log output in chunks
+        output = (stdout + "\n" + stderr).strip()
+        if output:
+            for line in output.split("\n")[-50:]:  # Last 50 lines
+                if line.strip():
+                    self._add_log(session, run, "install",
+                        f"[安装] {line}", "install", round_number)
+
+        if rc != 0:
+            return False, f"脚本执行失败 (exit code: {rc})\n{stderr[-500:]}"
+        return True, output
+
+    def _real_verify(self, session, run, round_number):
+        """Run real verification checks on the VM via SSH."""
+        if not self._vm_manager or self._vm_manager.is_simulation:
+            return None  # Fall back to simulation
+        if not self._vm_info or not run.project:
+            return None
+
+        config = run.project.config or {}
+        verify = config.get("verify", {})
+        results = {}
+        all_passed = True
+
+        # Check 1: Service status
+        service_name = verify.get("service_name", "")
+        if service_name:
+            rc, stdout, stderr = self._vm_manager.ssh_exec(
+                self._vm_info, f"systemctl is-active {service_name}")
+            passed = rc == 0 and "active" in stdout
+            results["service_status"] = {"passed": passed, "detail": stdout.strip() or stderr.strip()}
+            self._add_log(session, run, "verify",
+                f"[验证][服务状态] {service_name}: {'active ✓' if passed else 'failed ✗'}",
+                "verify", round_number)
+            if not passed:
+                all_passed = False
+
+        # Check 2: Port listening
+        port = verify.get("port", 0)
+        if port:
+            rc, stdout, stderr = self._vm_manager.ssh_exec(
+                self._vm_info, f"ss -tlnp | grep :{port}")
+            passed = rc == 0 and str(port) in stdout
+            results["port_listen"] = {"passed": passed, "detail": stdout.strip() or f"端口 {port} 未监听"}
+            self._add_log(session, run, "verify",
+                f"[验证][端口监听] 端口 {port}: {'已监听 ✓' if passed else '未监听 ✗'}",
+                "verify", round_number)
+            if not passed:
+                all_passed = False
+
+        # Check 3: Health URL
+        health_url = verify.get("health_url", "")
+        if health_url:
+            rc, stdout, stderr = self._vm_manager.ssh_exec(
+                self._vm_info, f"curl -sf --max-time 10 {health_url}")
+            passed = rc == 0
+            results["api_health"] = {"passed": passed, "detail": stdout.strip()[:200] or stderr.strip()[:200]}
+            self._add_log(session, run, "verify",
+                f"[验证][API健康] {health_url}: {'HTTP 200 ✓' if passed else '请求失败 ✗'}",
+                "verify", round_number)
+            if not passed:
+                all_passed = False
+
+        # Check 4: Process name
+        process_name = verify.get("process_name", "")
+        if process_name:
+            rc, stdout, stderr = self._vm_manager.ssh_exec(
+                self._vm_info, f"pgrep -x {process_name}")
+            passed = rc == 0
+            results["process_check"] = {"passed": passed, "detail": f"PID: {stdout.strip()}" if passed else "进程未找到"}
+            self._add_log(session, run, "verify",
+                f"[验证][进程检查] {process_name}: {'运行中 ✓' if passed else '未运行 ✗'}",
+                "verify", round_number)
+            if not passed:
+                all_passed = False
+
+        # Check 5: Custom command
+        custom_cmd = verify.get("custom_command", "") or (run.project.verify_script or "")
+        if custom_cmd:
+            rc, stdout, stderr = self._vm_manager.ssh_exec(self._vm_info, custom_cmd)
+            passed = rc == 0
+            results["custom_check"] = {"passed": passed, "detail": stdout.strip()[:200] or stderr.strip()[:200]}
+            self._add_log(session, run, "verify",
+                f"[验证][自定义] $ {custom_cmd}: {'通过 ✓' if passed else '失败 ✗'}",
+                "verify", round_number)
+            if not passed:
+                all_passed = False
+
+        # Check 6: Script exit code (run verify_script if it's a path, not a command)
+        # This is covered by custom_command above
+        if not results:
+            return None  # No real checks configured, fall back to simulation
+
+        # Summary
+        total = len(results)
+        passed_count = sum(1 for v in results.values() if v["passed"])
+        if all_passed:
+            self._add_log(session, run, "verify",
+                f"[验证] 所有 {total} 个检查项均通过！", "verify", round_number)
+        else:
+            failed_names = [k for k, v in results.items() if not v["passed"]]
+            self._add_log(session, run, "verify",
+                f"[验证] 验证失败: {total - passed_count}/{total} 个检查项未通过 ({', '.join(failed_names)})",
+                "verify", round_number)
+
+        return all_passed
+
+    # ------------------------------------------------------------------
     # State machine steps
     # ------------------------------------------------------------------
 

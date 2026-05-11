@@ -53,23 +53,23 @@ def _seed_data(app):
         Project(
             name="SpringBoot用户服务",
             repo_url="https://git.example.com/platform/user-service",
-            install_script="#!/bin/bash\nset -e\napt-get install -y openjdk-17-jdk\nmvn clean package -DskipTests\nsystemctl enable user-service && systemctl start user-service",
-            verify_script="#!/bin/bash\nsystemctl is-active user-service\ncurl -sf http://127.0.0.1:8080/actuator/health",
-            config={"port": 8080, "jvm_opts": "-Xms512m -Xmx1024m", "profiles": "prod"},
+            install_script="scripts/install.sh",
+            verify_script="curl -sf http://127.0.0.1:8080/actuator/health",
+            config={"script_args": "", "work_dir": "/opt/workspace", "timeout": 1800, "run_as": "root", "verify": {"service_name": "user-service", "port": 8080, "health_url": "http://127.0.0.1:8080/actuator/health", "process_name": "java", "custom_command": ""}},
         ),
         Project(
             name="Python数据分析平台",
             repo_url="https://git.example.com/platform/data-analyzer",
-            install_script="#!/bin/bash\nset -e\npython3 -m venv /opt/analyzer/venv\nsource /opt/analyzer/venv/bin/activate\npip install -r requirements.txt\npython manage.py db upgrade\ngsystemctl enable analyzer && systemctl start analyzer",
-            verify_script="#!/bin/bash\nsystemctl is-active analyzer\ncurl -sf http://127.0.0.1:5000/health",
-            config={"port": 5000, "workers": 4, "log_level": "info"},
+            install_script="scripts/install.sh",
+            verify_script="curl -sf http://127.0.0.1:5000/health",
+            config={"script_args": "", "work_dir": "/opt/workspace", "timeout": 1800, "run_as": "root", "verify": {"service_name": "analyzer", "port": 5000, "health_url": "http://127.0.0.1:5000/health", "process_name": "python3", "custom_command": ""}},
         ),
         Project(
             name="Node.js前端网关",
             repo_url="https://git.example.com/platform/frontend-gateway",
-            install_script="#!/bin/bash\nset -e\nnpm ci --production\nnpm run build\npm2 start ecosystem.config.js",
-            verify_script="#!/bin/bash\npm2 status gateway | grep online\ncurl -sf http://127.0.0.1:3000/ping",
-            config={"port": 3000, "node_env": "production", "cluster_mode": True},
+            install_script="scripts/install.sh",
+            verify_script="pm2 status gateway | grep online",
+            config={"script_args": "", "work_dir": "/opt/workspace", "timeout": 1200, "run_as": "root", "verify": {"service_name": "gateway", "port": 3000, "health_url": "http://127.0.0.1:3000/ping", "process_name": "node", "custom_command": "pm2 status gateway | grep online"}},
         ),
     ]
     for p in projects:

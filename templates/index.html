@@ -268,7 +268,7 @@ a:hover { text-decoration: underline; }
 .modal-overlay.active { display: flex; }
 .modal {
   background: var(--bg-surface); border: 1px solid var(--border);
-  border-radius: var(--radius-lg); width: 90%; max-width: 520px;
+  border-radius: var(--radius-lg); width: 90%; max-width: 680px;
   max-height: 80vh; display: flex; flex-direction: column;
   box-shadow: 0 8px 32px rgba(0,0,0,0.4);
 }
@@ -692,8 +692,8 @@ const App = {
           <h3>${this.escHtml(p.name)}</h3>
           <div class="project-repo">${this.escHtml(p.repo_url||'')}</div>
           <div style="font-size:12px;color:var(--text-muted)">
-            安装脚本: ${this.escHtml(p.install_script||'-')}<br>
-            验证脚本: ${this.escHtml(p.verify_script||'-')}
+            脚本: ${this.escHtml(p.install_script||'-')} ${(p.config&&p.config.script_args)?this.escHtml(p.config.script_args):''}<br>
+            验证: ${(p.config&&p.config.verify&&p.config.verify.service_name)?'服务:'+this.escHtml(p.config.verify.service_name):''} ${(p.config&&p.config.verify&&p.config.verify.port)?'端口:'+p.config.verify.port:''}${p.verify_script?' | 自定义命令':''}
           </div>
           <div class="project-actions">
             <button class="btn btn--ghost btn--sm" onclick="App.showProjectModal(${p.id})">编辑</button>
@@ -708,27 +708,67 @@ const App = {
   showProjectModal(id) {
     const p = id ? this.state.projects.find(x => x.id === id) : null;
     const title = p ? '编辑项目' : '新建项目';
+    const cfg = (p && p.config) || {};
+    const verify = cfg.verify || {};
     const body = `
-      <div class="form-group"><label class="form-label">项目名称</label><input class="form-input" id="pf-name" value="${p?this.escHtml(p.name):''}"></div>
-      <div class="form-group"><label class="form-label">仓库地址</label><input class="form-input" id="pf-repo" value="${p?this.escHtml(p.repo_url||''):''}"></div>
-      <div class="form-group"><label class="form-label">安装脚本路径</label><input class="form-input" id="pf-install" value="${p?this.escHtml(p.install_script||''):''}"></div>
-      <div class="form-group"><label class="form-label">验证脚本路径</label><input class="form-input" id="pf-verify" value="${p?this.escHtml(p.verify_script||''):''}"></div>
-      <div class="form-group"><label class="form-label">配置 (JSON)</label><textarea class="form-textarea" id="pf-config">${p&&p.config?JSON.stringify(p.config,null,2):'{}'}</textarea></div>`;
+      <div style="display:grid;gap:12px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="form-group"><label class="form-label">项目名称</label><input class="form-input" id="pf-name" value="${p?this.escHtml(p.name):''}"></div>
+          <div class="form-group"><label class="form-label">仓库地址 (Git URL)</label><input class="form-input" id="pf-repo" placeholder="https://github.com/user/repo" value="${p?this.escHtml(p.repo_url||''):''}"></div>
+        </div>
+        <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
+          <div style="font-size:13px;font-weight:600;color:var(--accent-blue);margin-bottom:10px">脚本执行配置</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="form-group"><label class="form-label">脚本路径 (仓库内相对路径)</label><input class="form-input" id="pf-script-path" placeholder="例: MySQL.sh 或 scripts/install.sh" value="${p?this.escHtml(p.install_script||''):''}"></div>
+            <div class="form-group"><label class="form-label">脚本参数</label><input class="form-input" id="pf-script-args" placeholder="例: si -lf eth0 -pt 3306 -dp MySQL2024" value="${this.escHtml(cfg.script_args||'')}"></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+            <div class="form-group"><label class="form-label">工作目录 (VM上)</label><input class="form-input" id="pf-work-dir" placeholder="/opt/workspace" value="${this.escHtml(cfg.work_dir||'/opt/workspace')}"></div>
+            <div class="form-group"><label class="form-label">执行用户</label><input class="form-input" id="pf-run-as" placeholder="root" value="${this.escHtml(cfg.run_as||'root')}"></div>
+            <div class="form-group"><label class="form-label">超时时间 (秒)</label><input class="form-input" id="pf-timeout" type="number" placeholder="3600" value="${cfg.timeout||3600}"></div>
+          </div>
+        </div>
+        <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
+          <div style="font-size:13px;font-weight:600;color:var(--accent-green);margin-bottom:10px">验证配置</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="form-group"><label class="form-label">Systemd 服务名</label><input class="form-input" id="pf-v-service" placeholder="例: mysqld, nginx, user-service" value="${this.escHtml(verify.service_name||'')}"></div>
+            <div class="form-group"><label class="form-label">监听端口</label><input class="form-input" id="pf-v-port" type="number" placeholder="例: 3306, 8080" value="${verify.port||''}"></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="form-group"><label class="form-label">健康检查 URL</label><input class="form-input" id="pf-v-health" placeholder="例: http://127.0.0.1:8080/health" value="${this.escHtml(verify.health_url||'')}"></div>
+            <div class="form-group"><label class="form-label">进程名称</label><input class="form-input" id="pf-v-process" placeholder="例: mysqld, java, node" value="${this.escHtml(verify.process_name||'')}"></div>
+          </div>
+          <div class="form-group"><label class="form-label">自定义验证命令 (可选)</label><input class="form-input" id="pf-v-custom" placeholder="例: mysql -uroot -pMySQL2024 -e 'SELECT 1'" value="${p?this.escHtml(p.verify_script||''):''}"></div>
+        </div>
+      </div>`;
     const footer = `<button class="btn btn--ghost" onclick="App.closeModal()">取消</button>
       <button class="btn btn--primary" onclick="App.saveProject(${id||'null'})">保存</button>`;
     this.showModal(title, body, footer);
   },
 
   async saveProject(id) {
+    const portVal = document.getElementById('pf-v-port').value;
     const data = {
       name: document.getElementById('pf-name').value,
       repo_url: document.getElementById('pf-repo').value,
-      install_script: document.getElementById('pf-install').value,
-      verify_script: document.getElementById('pf-verify').value,
-      config: document.getElementById('pf-config').value
+      install_script: document.getElementById('pf-script-path').value,
+      verify_script: document.getElementById('pf-v-custom').value,
+      config: {
+        script_args: document.getElementById('pf-script-args').value,
+        work_dir: document.getElementById('pf-work-dir').value || '/opt/workspace',
+        run_as: document.getElementById('pf-run-as').value || 'root',
+        timeout: parseInt(document.getElementById('pf-timeout').value) || 3600,
+        verify: {
+          service_name: document.getElementById('pf-v-service').value,
+          port: portVal ? parseInt(portVal) : 0,
+          health_url: document.getElementById('pf-v-health').value,
+          process_name: document.getElementById('pf-v-process').value,
+          custom_command: document.getElementById('pf-v-custom').value,
+        }
+      }
     };
-    try { data.config = JSON.parse(data.config); } catch(e) { data.config = {}; }
     if (!data.name) { this.toast('请输入项目名称', 'error'); return; }
+    if (!data.install_script) { this.toast('请输入脚本路径', 'error'); return; }
     if (id) { await this.api.put('/api/projects/' + id, data); }
     else { await this.api.post('/api/projects', data); }
     this.closeModal();
