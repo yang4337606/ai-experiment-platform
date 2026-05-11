@@ -23,7 +23,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -128,7 +128,8 @@ class VMRunCLI:
         log.info("vmrun: %s", " ".join(cmd))
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout
+                cmd, capture_output=True, text=True, timeout=timeout,
+                encoding="utf-8", errors="replace",
             )
             if result.returncode != 0:
                 raise VMRunError(
@@ -326,7 +327,7 @@ class VMwareManager:
             vmx_path=dest_vmx,
             template_vmx=template_vmx,
             state=VMState.STOPPED.value,
-            created_at=datetime.utcnow().isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
         )
 
         if self._simulation:
@@ -484,7 +485,8 @@ class VMwareManager:
         ])
         try:
             result = subprocess.run(
-                ssh_cmd, capture_output=True, text=True, timeout=timeout
+                ssh_cmd, capture_output=True, text=True, timeout=timeout,
+                encoding="utf-8", errors="replace",
             )
             return (result.returncode, result.stdout, result.stderr)
         except subprocess.TimeoutExpired:
@@ -502,7 +504,8 @@ class VMwareManager:
         if self.config.ssh_key_path:
             scp_cmd.extend(["-i", self.config.ssh_key_path])
         scp_cmd.extend([local_path, f"{self.config.ssh_user}@{info.ip}:{remote_path}"])
-        subprocess.run(scp_cmd, capture_output=True, text=True, timeout=120, check=True)
+        subprocess.run(scp_cmd, capture_output=True, text=True, timeout=120, check=True,
+                       encoding="utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------------------

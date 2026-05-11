@@ -3,7 +3,7 @@ SQLAlchemy models for AI Automated Experiment Platform (AI自动化实验平台)
 """
 import enum
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet
 from flask_sqlalchemy import SQLAlchemy
@@ -103,9 +103,9 @@ class Project(db.Model):
     install_script = db.Column(db.Text, nullable=False)
     verify_script = db.Column(db.Text, nullable=False)
     config = db.Column(db.JSON, default=dict)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
-    runs = db.relationship("TestRun", backref="project", lazy="dynamic")
+    runs = db.relationship("TestRun", backref="project", lazy="dynamic", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
@@ -132,7 +132,7 @@ class TestRun(db.Model):
     current_retry = db.Column(db.Integer, default=0)      # retries used so far
     failure_code = db.Column(db.String(32), default="")    # FailureCode enum value
     vm_info = db.Column(db.JSON, default=dict)            # ip, hostname, specs
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     logs = db.relationship("RunLog", backref="run", lazy="dynamic", cascade="all, delete-orphan")
     analyses = db.relationship("AIAnalysis", backref="run", lazy="dynamic", cascade="all, delete-orphan")
@@ -171,7 +171,7 @@ class RunLog(db.Model):
     phase = db.Column(db.String(64))
     content = db.Column(db.Text)
     log_type = db.Column(db.String(32), default=LogType.INSTALL.value)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
         return {
@@ -195,7 +195,7 @@ class AIAnalysis(db.Model):
     fix_plan = db.Column(db.Text)
     files_modified = db.Column(db.JSON, default=list)
     commit_message = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
         return {
@@ -219,7 +219,7 @@ class VerifyResult(db.Model):
     check_name = db.Column(db.String(64))   # exit_code / log_keywords / service_status / port_listen / api_health
     passed = db.Column(db.Boolean, default=False)
     detail = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
         return {
@@ -244,7 +244,7 @@ class TestReport(db.Model):
     branch_url = db.Column(db.String(512))
     commits = db.Column(db.JSON, default=list)        # list of commit records
     final_status = db.Column(db.String(32))
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
         return {
@@ -274,7 +274,7 @@ class ServiceCredential(db.Model):
     extra = db.Column(db.JSON, default=dict)                               # api_base, model, etc.
     enabled = db.Column(db.Boolean, default=True)
     last_used_at = db.Column(db.DateTime)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=lambda: datetime.now(timezone.utc))
 
     SERVICE_TYPES = ("github", "mulerun", "chatgpt", "qwen")
     # Failover chain for AI providers (设计文档 4.4.4)
@@ -325,7 +325,7 @@ class CreditLog(db.Model):
     amount = db.Column(db.Float, default=0.0)
     balance_after = db.Column(db.Float, default=0.0)
     detail = db.Column(db.Text, default="")
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     credential = db.relationship("ServiceCredential", backref="credit_logs")
 
@@ -355,7 +355,7 @@ class ProgressContext(db.Model):
     completed_steps = db.Column(db.JSON, default=list)  # steps done so far
     pending_issues = db.Column(db.JSON, default=list)   # issues remaining
     context_prompt = db.Column(db.Text, default="")     # generated prompt for new session
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
         return {
@@ -386,7 +386,7 @@ class VMwareConfigModel(db.Model):
     ssh_key_path = db.Column(db.String(512), default="")
     ssh_timeout = db.Column(db.Integer, default=120)
     simulation = db.Column(db.Boolean, default=True)                  # default to simulation
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
         return {

@@ -5,7 +5,7 @@ Drives a TestRun through its full state machine in a background thread.
 import random
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # ---------------------------------------------------------------------------
 # Realistic log content libraries (Chinese)
@@ -372,7 +372,7 @@ class WorkflowEngine:
             phase=phase,
             content=content,
             log_type=log_type,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         session.add(log)
         session.commit()
@@ -480,7 +480,7 @@ class WorkflowEngine:
         """Deduct credits and log the event."""
         from models import CreditLog
         credential.credit_balance = max(0, credential.credit_balance - amount)
-        credential.last_used_at = datetime.utcnow()
+        credential.last_used_at = datetime.now(timezone.utc)
         log = CreditLog(
             credential_id=credential.id, run_id=run.id,
             event_type="deduct", amount=amount,
@@ -779,7 +779,7 @@ class WorkflowEngine:
             fix_plan=scenario["fix_plan"],
             files_modified=scenario["files"],
             commit_message=commit_msg,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         session.add(analysis)
         session.commit()
@@ -863,7 +863,7 @@ class WorkflowEngine:
             for check in checks:
                 vr = VerifyResult(
                     run_id=run.id, round_number=round_number, check_name=check,
-                    passed=True, detail="检查通过", created_at=datetime.utcnow(),
+                    passed=True, detail="检查通过", created_at=datetime.now(timezone.utc),
                 )
                 session.add(vr)
         else:
@@ -878,10 +878,10 @@ class WorkflowEngine:
             for check in checks:
                 if check in fails:
                     vr = VerifyResult(run_id=run.id, round_number=round_number, check_name=check,
-                                      passed=False, detail=fails[check], created_at=datetime.utcnow())
+                                      passed=False, detail=fails[check], created_at=datetime.now(timezone.utc))
                 else:
                     vr = VerifyResult(run_id=run.id, round_number=round_number, check_name=check,
-                                      passed=True, detail="检查通过", created_at=datetime.utcnow())
+                                      passed=True, detail="检查通过", created_at=datetime.now(timezone.utc))
                 session.add(vr)
         session.commit()
 
@@ -943,7 +943,7 @@ class WorkflowEngine:
             branch_url=branch_url,
             commits=commits,
             final_status=final_status,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         session.add(report)
         session.commit()
@@ -962,7 +962,7 @@ class WorkflowEngine:
             if not run:
                 return
 
-            run.start_time = datetime.utcnow()
+            run.start_time = datetime.now(timezone.utc)
             run.status = "init_vm"
             session.commit()
 
@@ -1001,7 +1001,7 @@ class WorkflowEngine:
                         run.failure_code = ""
                         self._generate_report(session, run, "success", all_analyses)
                         run.status = "success"
-                        run.end_time = datetime.utcnow()
+                        run.end_time = datetime.now(timezone.utc)
                         session.commit()
                         self._send_notification(session, run, "success", all_analyses)
                         return
@@ -1021,21 +1021,21 @@ class WorkflowEngine:
                 self._step_rollback(session, run, ctx)
                 self._generate_report(session, run, "failed", all_analyses)
                 run.status = "failed"
-                run.end_time = datetime.utcnow()
+                run.end_time = datetime.now(timezone.utc)
                 session.commit()
                 self._send_notification(session, run, "failed", all_analyses, last_scenario)
 
             except TimeoutError as e:
                 run.status = "failed"
                 run.failure_code = FailureCode.ENV_ERROR.value
-                run.end_time = datetime.utcnow()
+                run.end_time = datetime.now(timezone.utc)
                 self._add_log(session, run, "system", f"[超时] {e}", "install", run.current_retry or 1)
                 session.commit()
                 self._send_notification(session, run, "failed", all_analyses)
             except Exception as e:
                 run.status = "failed"
                 run.failure_code = FailureCode.UNKNOWN_ERROR.value
-                run.end_time = datetime.utcnow()
+                run.end_time = datetime.now(timezone.utc)
                 self._add_log(session, run, "system", f"[系统错误] {e}", "install", run.current_retry or 1)
                 session.commit()
                 self._send_notification(session, run, "failed", all_analyses)
