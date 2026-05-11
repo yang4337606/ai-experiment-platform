@@ -105,7 +105,7 @@ class Project(db.Model):
     config = db.Column(db.JSON, default=dict)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-    runs = db.relationship("TestRun", backref="project", lazy="dynamic")
+    runs = db.relationship("TestRun", backref="project", lazy="dynamic", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
