@@ -1,0 +1,1055 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 自动化实验平台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* === CSS Reset & Custom Properties === */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg-base: #0b0e14;
+  --bg-surface: #141820;
+  --bg-elevated: #1a1f2e;
+  --bg-hover: #222838;
+  --border: #2a2f3e;
+  --border-light: #353b4e;
+  --text-primary: #e2e5ed;
+  --text-secondary: #8b90a0;
+  --text-muted: #5c6070;
+  --accent-blue: #4f8ff7;
+  --accent-blue-dim: rgba(79,143,247,0.15);
+  --accent-green: #34d399;
+  --accent-green-dim: rgba(52,211,153,0.15);
+  --accent-red: #f87171;
+  --accent-red-dim: rgba(248,113,113,0.15);
+  --accent-yellow: #fbbf24;
+  --accent-yellow-dim: rgba(251,191,36,0.15);
+  --accent-purple: #a78bfa;
+  --accent-purple-dim: rgba(167,139,250,0.15);
+  --sidebar-w: 240px;
+  --topbar-h: 56px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --shadow: 0 2px 8px rgba(0,0,0,0.3);
+  --transition: 0.2s ease;
+}
+html, body { height: 100%; }
+body {
+  font-family: 'Inter', -apple-system, sans-serif;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+}
+a { color: var(--accent-blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* === Layout === */
+#sidebar {
+  position: fixed; left: 0; top: 0; bottom: 0;
+  width: var(--sidebar-w);
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  z-index: 100;
+  transition: transform var(--transition);
+}
+.sidebar-header {
+  padding: 20px 20px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.sidebar-logo {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 15px; font-weight: 700; color: var(--text-primary);
+}
+.sidebar-logo .logo-icon {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; color: #fff;
+}
+.nav-links { list-style: none; padding: 12px 8px; flex: 1; }
+.nav-link {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; border-radius: var(--radius);
+  color: var(--text-secondary); cursor: pointer;
+  transition: all var(--transition); font-size: 13.5px; font-weight: 500;
+  margin-bottom: 2px;
+}
+.nav-link:hover { background: var(--bg-hover); color: var(--text-primary); }
+.nav-link.active {
+  background: var(--accent-blue-dim); color: var(--accent-blue);
+}
+.nav-link svg { width: 18px; height: 18px; flex-shrink: 0; }
+.sidebar-footer {
+  padding: 14px 20px; border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--text-muted);
+}
+
+#main {
+  margin-left: var(--sidebar-w);
+  height: 100vh; display: flex; flex-direction: column;
+}
+#topbar {
+  height: var(--topbar-h); min-height: var(--topbar-h);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 24px;
+}
+.topbar-title { font-size: 16px; font-weight: 600; }
+.topbar-actions { display: flex; gap: 8px; align-items: center; }
+#content {
+  flex: 1; overflow-y: auto; padding: 24px;
+}
+
+/* === Components === */
+.page { display: none; }
+.page.active { display: block; }
+
+.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+.stat-card {
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 20px;
+}
+.stat-card .stat-label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.stat-card .stat-value { font-size: 28px; font-weight: 700; }
+.stat-card .stat-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+.card {
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); overflow: hidden;
+}
+.card-header {
+  padding: 16px 20px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  font-weight: 600; font-size: 14px;
+}
+
+.data-table { width: 100%; border-collapse: collapse; }
+.data-table th {
+  text-align: left; padding: 10px 16px;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--text-muted); font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+.data-table td {
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  font-size: 13px; vertical-align: middle;
+}
+.data-table tr:hover td { background: var(--bg-hover); }
+.data-table tr:last-child td { border-bottom: none; }
+
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; border-radius: 20px;
+  font-size: 11px; font-weight: 600;
+}
+.badge--success { background: var(--accent-green-dim); color: var(--accent-green); }
+.badge--failed { background: var(--accent-red-dim); color: var(--accent-red); }
+.badge--running { background: var(--accent-blue-dim); color: var(--accent-blue); }
+.badge--pending { background: rgba(255,255,255,0.06); color: var(--text-secondary); }
+.badge--warning { background: var(--accent-yellow-dim); color: var(--accent-yellow); }
+.badge--purple { background: var(--accent-purple-dim); color: var(--accent-purple); }
+.badge-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.badge--running .badge-dot { animation: pulse 1.5s infinite; }
+
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 16px; border-radius: var(--radius);
+  font-size: 13px; font-weight: 500; border: none;
+  cursor: pointer; transition: all var(--transition);
+  font-family: inherit;
+}
+.btn--primary { background: var(--accent-blue); color: #fff; }
+.btn--primary:hover { background: #3d7de0; }
+.btn--danger { background: var(--accent-red); color: #fff; }
+.btn--danger:hover { background: #e05858; }
+.btn--ghost {
+  background: transparent; color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.btn--ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
+.btn--sm { padding: 5px 10px; font-size: 12px; }
+
+/* Pipeline Visualization */
+.pipeline { display: flex; align-items: flex-start; gap: 0; padding: 20px 0; overflow-x: auto; }
+.pipeline-node {
+  display: flex; flex-direction: column; align-items: center;
+  min-width: 90px; position: relative;
+}
+.pipeline-node:not(:last-child)::after {
+  content: ''; position: absolute;
+  top: 16px; left: calc(50% + 18px); width: calc(100% - 36px);
+  height: 2px; background: var(--border);
+}
+.pipeline-node.completed:not(:last-child)::after { background: var(--accent-green); }
+.pipeline-node.active:not(:last-child)::after {
+  background: linear-gradient(90deg, var(--accent-blue), var(--border));
+}
+.pipeline-dot {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--bg-elevated); border: 2px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; z-index: 1; transition: all 0.3s;
+}
+.pipeline-node.completed .pipeline-dot {
+  background: var(--accent-green-dim); border-color: var(--accent-green); color: var(--accent-green);
+}
+.pipeline-node.active .pipeline-dot {
+  background: var(--accent-blue-dim); border-color: var(--accent-blue); color: var(--accent-blue);
+  animation: pulse 1.5s infinite; box-shadow: 0 0 12px var(--accent-blue-dim);
+}
+.pipeline-node.failed .pipeline-dot {
+  background: var(--accent-red-dim); border-color: var(--accent-red); color: var(--accent-red);
+}
+.pipeline-label {
+  margin-top: 8px; font-size: 11px; color: var(--text-muted);
+  text-align: center; white-space: nowrap;
+}
+.pipeline-node.completed .pipeline-label { color: var(--accent-green); }
+.pipeline-node.active .pipeline-label { color: var(--accent-blue); font-weight: 600; }
+.pipeline-node.failed .pipeline-label { color: var(--accent-red); }
+
+/* Log Viewer */
+.log-viewer {
+  background: #0a0d12; border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px;
+  max-height: 400px; overflow-y: auto;
+  font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  line-height: 1.7;
+}
+.log-viewer .log-line { white-space: pre-wrap; word-break: break-all; }
+.log-viewer .log-time { color: var(--text-muted); }
+.log-viewer .log-info { color: var(--accent-blue); }
+.log-viewer .log-success { color: var(--accent-green); }
+.log-viewer .log-error { color: var(--accent-red); }
+.log-viewer .log-warn { color: var(--accent-yellow); }
+
+/* AI Analysis Card */
+.ai-card {
+  background: var(--bg-surface); border: 1px solid var(--accent-purple);
+  border-radius: var(--radius-lg); padding: 20px; margin: 16px 0;
+  border-left: 3px solid var(--accent-purple);
+}
+.ai-card h4 { color: var(--accent-purple); margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.ai-section { margin-bottom: 12px; }
+.ai-section-title { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.ai-section-content { font-size: 13px; line-height: 1.7; }
+
+/* Forms */
+.form-group { margin-bottom: 16px; }
+.form-label { display: block; font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
+.form-input, .form-select, .form-textarea {
+  width: 100%; padding: 9px 12px;
+  background: var(--bg-base); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text-primary);
+  font-size: 13px; font-family: inherit;
+  transition: border-color var(--transition);
+}
+.form-input:focus, .form-select:focus, .form-textarea:focus {
+  outline: none; border-color: var(--accent-blue);
+}
+.form-textarea { min-height: 80px; resize: vertical; }
+
+/* Modal */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  display: none; align-items: center; justify-content: center;
+  z-index: 200; backdrop-filter: blur(4px);
+}
+.modal-overlay.active { display: flex; }
+.modal {
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); width: 90%; max-width: 520px;
+  max-height: 80vh; display: flex; flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+.modal-header {
+  padding: 16px 20px; border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+  font-weight: 600;
+}
+.modal-body { padding: 20px; overflow-y: auto; flex: 1; }
+.modal-footer {
+  padding: 14px 20px; border-top: 1px solid var(--border);
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+.modal-close {
+  background: none; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 18px; padding: 4px;
+}
+.modal-close:hover { color: var(--text-primary); }
+
+/* Toast */
+#toast-container {
+  position: fixed; top: 20px; right: 20px; z-index: 300;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.toast {
+  padding: 12px 16px; border-radius: var(--radius);
+  font-size: 13px; font-weight: 500;
+  box-shadow: var(--shadow); animation: slideIn 0.3s ease;
+  display: flex; align-items: center; gap: 8px;
+}
+.toast--success { background: #0f2a1e; border: 1px solid var(--accent-green); color: var(--accent-green); }
+.toast--error { background: #2a0f0f; border: 1px solid var(--accent-red); color: var(--accent-red); }
+.toast--info { background: #0f1a2a; border: 1px solid var(--accent-blue); color: var(--accent-blue); }
+@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* Verify Table */
+.verify-table .pass { color: var(--accent-green); }
+.verify-table .fail { color: var(--accent-red); }
+
+/* Report Sections */
+.report-section { margin-bottom: 24px; }
+.report-section h3 {
+  font-size: 15px; margin-bottom: 12px; padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.report-meta { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+.report-meta-item .label { font-size: 11px; color: var(--text-muted); }
+.report-meta-item .value { font-size: 14px; font-weight: 500; }
+
+/* Project Cards */
+.project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+.project-card {
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 20px;
+  transition: border-color var(--transition);
+}
+.project-card:hover { border-color: var(--border-light); }
+.project-card h3 { font-size: 15px; margin-bottom: 8px; }
+.project-card .project-repo { font-size: 12px; color: var(--text-muted); margin-bottom: 12px; word-break: break-all; }
+.project-card .project-actions { display: flex; gap: 8px; margin-top: 12px; }
+
+/* Status bar chart */
+.status-bars { padding: 16px 20px; }
+.status-bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.status-bar-label { width: 60px; font-size: 12px; color: var(--text-secondary); text-align: right; }
+.status-bar-track { flex: 1; height: 20px; background: var(--bg-elevated); border-radius: 4px; overflow: hidden; }
+.status-bar-fill { height: 100%; border-radius: 4px; transition: width 0.6s ease; display: flex; align-items: center; padding-left: 8px; font-size: 11px; font-weight: 600; color: #fff; }
+.status-bar-count { width: 30px; font-size: 12px; color: var(--text-muted); text-align: right; }
+
+/* Filter bar */
+.filter-bar { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+.filter-bar .form-select, .filter-bar .form-input { width: auto; min-width: 140px; padding: 7px 10px; }
+
+/* Empty state */
+.empty-state { text-align: center; padding: 48px 20px; color: var(--text-muted); }
+.empty-state .empty-icon { font-size: 40px; margin-bottom: 12px; opacity: 0.3; }
+.empty-state p { font-size: 14px; }
+
+/* Responsive */
+@media (max-width: 1024px) {
+  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 768px) {
+  #sidebar { transform: translateX(-100%); }
+  #sidebar.open { transform: none; }
+  #main { margin-left: 0; }
+  .stat-grid { grid-template-columns: 1fr; }
+  .report-meta { grid-template-columns: 1fr; }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-light); }
+
+/* Tabs */
+.tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.tab {
+  padding: 10px 16px; font-size: 13px; font-weight: 500;
+  color: var(--text-muted); cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all var(--transition);
+}
+.tab:hover { color: var(--text-secondary); }
+.tab.active { color: var(--accent-blue); border-bottom-color: var(--accent-blue); }
+
+/* Detail sections */
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+.detail-item .detail-label { font-size: 11px; color: var(--text-muted); margin-bottom: 2px; }
+.detail-item .detail-value { font-size: 14px; font-weight: 500; }
+@media (max-width: 768px) { .detail-grid { grid-template-columns: 1fr; } }
+
+.section-title { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
+.mt-16 { margin-top: 16px; }
+.mb-16 { margin-bottom: 16px; }
+.mb-24 { margin-bottom: 24px; }
+.flex-between { display: flex; justify-content: space-between; align-items: center; }
+</style>
+</head>
+<body>
+
+<!-- SIDEBAR -->
+<nav id="sidebar">
+  <div class="sidebar-header">
+    <div class="sidebar-logo">
+      <div class="logo-icon">AI</div>
+      <span>AI 实验平台</span>
+    </div>
+  </div>
+  <ul class="nav-links">
+    <li class="nav-link active" data-page="dashboard" onclick="App.navigate('dashboard')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      <span>仪表盘</span>
+    </li>
+    <li class="nav-link" data-page="projects" onclick="App.navigate('projects')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+      <span>项目管理</span>
+    </li>
+    <li class="nav-link" data-page="runs" onclick="App.navigate('runs')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      <span>测试运行</span>
+    </li>
+    <li class="nav-link" data-page="reports" onclick="App.navigate('reports')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      <span>测试报告</span>
+    </li>
+    <li class="nav-link" data-page="settings" onclick="App.navigate('settings')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+      <span>系统设置</span>
+    </li>
+  </ul>
+  <div class="sidebar-footer">AI 自动化实验平台 v1.0</div>
+</nav>
+
+<!-- MAIN -->
+<div id="main">
+  <header id="topbar">
+    <div class="topbar-title" id="page-title">仪表盘</div>
+    <div class="topbar-actions">
+      <button class="btn btn--primary btn--sm" onclick="App.createRun()">+ 新建测试</button>
+    </div>
+  </header>
+  <div id="content">
+    <!-- PAGE: Dashboard -->
+    <section id="page-dashboard" class="page active"></section>
+    <!-- PAGE: Projects -->
+    <section id="page-projects" class="page"></section>
+    <!-- PAGE: Runs -->
+    <section id="page-runs" class="page"></section>
+    <!-- PAGE: Run Detail -->
+    <section id="page-run-detail" class="page"></section>
+    <!-- PAGE: Reports -->
+    <section id="page-reports" class="page"></section>
+    <!-- PAGE: Report Detail -->
+    <section id="page-report-detail" class="page"></section>
+    <!-- PAGE: Settings -->
+    <section id="page-settings" class="page"></section>
+  </div>
+</div>
+
+<!-- MODAL -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <span id="modal-title"></span>
+      <button class="modal-close" onclick="App.closeModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-footer" id="modal-footer"></div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast-container"></div>
+
+<script>
+const App = {
+  state: { currentPage: 'dashboard', polling: null, projects: [], runDetailId: null },
+
+  // === API Client ===
+  api: {
+    async get(url) {
+      try { const r = await fetch(url); if (!r.ok) throw new Error(r.statusText); return r.json(); }
+      catch(e) { App.toast('请求失败: ' + e.message, 'error'); return null; }
+    },
+    async post(url, data) {
+      try { const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) }); return r.json(); }
+      catch(e) { App.toast('请求失败: ' + e.message, 'error'); return null; }
+    },
+    async put(url, data) {
+      try { const r = await fetch(url, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) }); return r.json(); }
+      catch(e) { App.toast('请求失败: ' + e.message, 'error'); return null; }
+    },
+    async del(url) {
+      try { const r = await fetch(url, { method:'DELETE' }); return r.json(); }
+      catch(e) { App.toast('请求失败: ' + e.message, 'error'); return null; }
+    }
+  },
+
+  // === Navigation ===
+  navigate(page, id) {
+    this.stopPolling();
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.nav-link').forEach(n => n.classList.remove('active'));
+    const basePage = page.split('-')[0] === 'run' ? 'runs' : (page.split('-')[0] === 'report' ? 'reports' : page);
+    const navEl = document.querySelector(`.nav-link[data-page="${basePage}"]`);
+    if (navEl) navEl.classList.add('active');
+    const titles = { dashboard:'仪表盘', projects:'项目管理', runs:'测试运行', 'run-detail':'运行详情', reports:'测试报告', 'report-detail':'报告详情', settings:'系统设置' };
+    document.getElementById('page-title').textContent = titles[page] || page;
+    const pageEl = document.getElementById('page-' + page);
+    if (pageEl) pageEl.classList.add('active');
+    this.state.currentPage = page;
+    switch(page) {
+      case 'dashboard': this.loadDashboard(); break;
+      case 'projects': this.loadProjects(); break;
+      case 'runs': this.loadRuns(); break;
+      case 'run-detail': this.loadRunDetail(id); break;
+      case 'reports': this.loadReports(); break;
+      case 'report-detail': this.loadReportDetail(id); break;
+      case 'settings': this.loadSettings(); break;
+    }
+  },
+
+  stopPolling() {
+    if (this.state.polling) { clearInterval(this.state.polling); this.state.polling = null; }
+  },
+
+  // === Utility Functions ===
+  toast(msg, type = 'info') {
+    const c = document.getElementById('toast-container');
+    const t = document.createElement('div');
+    t.className = 'toast toast--' + type;
+    t.textContent = msg;
+    c.appendChild(t);
+    setTimeout(() => t.remove(), 3500);
+  },
+
+  showModal(title, bodyHTML, footerHTML) {
+    document.getElementById('modal-title').textContent = title;
+    document.getElementById('modal-body').innerHTML = bodyHTML;
+    document.getElementById('modal-footer').innerHTML = footerHTML || '';
+    document.getElementById('modal-overlay').classList.add('active');
+  },
+
+  closeModal() {
+    document.getElementById('modal-overlay').classList.remove('active');
+  },
+
+  statusBadge(status) {
+    const map = {
+      'success': ['success','成功'], 'failed': ['failed','失败'], 'pending': ['pending','等待中'],
+      'init_vm': ['running','初始化VM'], 'snapshot': ['running','创建快照'],
+      'code_pull': ['running','拉取代码'], 'upload': ['running','上传安装包'],
+      'install': ['running','安装中'], 'verify': ['running','验证中'],
+      'ai_analyze': ['purple','AI分析'], 'ai_fix': ['purple','AI修复'],
+      'rollback': ['warning','回滚中']
+    };
+    const [cls, label] = map[status] || ['pending', status];
+    return `<span class="badge badge--${cls}"><span class="badge-dot"></span>${label}</span>`;
+  },
+
+  statusLabel(status) {
+    const map = { success:'成功', failed:'失败', pending:'等待中', init_vm:'初始化VM', snapshot:'创建快照', code_pull:'拉取代码', upload:'上传安装包', install:'安装中', verify:'验证中', ai_analyze:'AI分析', ai_fix:'AI修复', rollback:'回滚中' };
+    return map[status] || status;
+  },
+
+  pipelineHTML(currentStatus) {
+    const stages = [
+      { key:'init_vm', label:'初始化VM', icon:'1' },
+      { key:'snapshot', label:'创建快照', icon:'2' },
+      { key:'code_pull', label:'拉取代码', icon:'3' },
+      { key:'upload', label:'上传安装包', icon:'4' },
+      { key:'install', label:'执行安装', icon:'5' },
+      { key:'verify', label:'验证测试', icon:'6' },
+      { key:'ai_analyze', label:'AI分析', icon:'A' },
+      { key:'ai_fix', label:'AI修复', icon:'F' },
+      { key:'rollback', label:'回滚VM', icon:'R' },
+      { key:'success', label:'完成', icon:'&#10003;' }
+    ];
+    const order = stages.map(s => s.key);
+    const ci = order.indexOf(currentStatus);
+    const isFailed = currentStatus === 'failed';
+    return '<div class="pipeline">' + stages.map((s, i) => {
+      let cls = '';
+      if (isFailed) {
+        cls = i < ci ? 'completed' : (i === ci ? 'failed' : '');
+      } else if (currentStatus === 'success') {
+        cls = 'completed';
+      } else {
+        cls = i < ci ? 'completed' : (i === ci ? 'active' : '');
+      }
+      return `<div class="pipeline-node ${cls}"><div class="pipeline-dot">${s.icon}</div><div class="pipeline-label">${s.label}</div></div>`;
+    }).join('') + '</div>';
+  },
+
+  formatDate(d) {
+    if (!d) return '-';
+    const dt = new Date(d);
+    return dt.toLocaleString('zh-CN', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  },
+
+  formatDuration(start, end) {
+    if (!start) return '-';
+    const s = new Date(start);
+    const e = end ? new Date(end) : new Date();
+    const diff = Math.floor((e - s) / 1000);
+    if (diff < 60) return diff + '秒';
+    if (diff < 3600) return Math.floor(diff/60) + '分' + (diff%60) + '秒';
+    return Math.floor(diff/3600) + '时' + Math.floor((diff%3600)/60) + '分';
+  },
+
+  // === Dashboard ===
+  async loadDashboard() {
+    const el = document.getElementById('page-dashboard');
+    const data = await this.api.get('/api/dashboard');
+    if (!data) return;
+    const d = data;
+    el.innerHTML = `
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="stat-label">总测试次数</div>
+          <div class="stat-value">${d.total_runs}</div>
+          <div class="stat-sub">全部项目</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">成功率</div>
+          <div class="stat-value" style="color:var(--accent-green)">${d.success_rate}%</div>
+          <div class="stat-sub">已完成测试</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">平均重试次数</div>
+          <div class="stat-value" style="color:var(--accent-yellow)">${d.avg_retries}</div>
+          <div class="stat-sub">每次运行</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">进行中</div>
+          <div class="stat-value" style="color:var(--accent-blue)">${d.active_runs}</div>
+          <div class="stat-sub">当前活跃</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px">
+        <div class="card">
+          <div class="card-header">最近测试运行</div>
+          <table class="data-table"><thead><tr>
+            <th>ID</th><th>项目</th><th>状态</th><th>重试</th><th>开始时间</th><th>操作</th>
+          </tr></thead><tbody id="dash-runs-body"></tbody></table>
+        </div>
+        <div class="card">
+          <div class="card-header">状态分布</div>
+          <div class="status-bars" id="dash-status-bars"></div>
+        </div>
+      </div>`;
+    // Recent runs
+    const runs = await this.api.get('/api/runs');
+    if (runs) {
+      const tbody = document.getElementById('dash-runs-body');
+      tbody.innerHTML = (runs.slice(0,8)).map(r => `<tr>
+        <td>#${r.id}</td><td>${r.project_name||'-'}</td><td>${this.statusBadge(r.status)}</td>
+        <td>${r.current_retry||0}</td><td>${this.formatDate(r.start_time)}</td>
+        <td><button class="btn btn--ghost btn--sm" onclick="App.navigate('run-detail',${r.id})">查看</button></td>
+      </tr>`).join('');
+      // Status chart
+      const counts = {};
+      runs.forEach(r => { counts[r.status] = (counts[r.status]||0) + 1; });
+      const total = runs.length || 1;
+      const bars = document.getElementById('dash-status-bars');
+      const colors = { success:'var(--accent-green)', failed:'var(--accent-red)', pending:'var(--text-muted)' };
+      bars.innerHTML = Object.entries(counts).map(([s,c]) => {
+        const pct = Math.round(c/total*100);
+        const color = colors[s] || 'var(--accent-blue)';
+        return `<div class="status-bar-row">
+          <div class="status-bar-label">${this.statusLabel(s)}</div>
+          <div class="status-bar-track"><div class="status-bar-fill" style="width:${pct}%;background:${color}">${pct}%</div></div>
+          <div class="status-bar-count">${c}</div>
+        </div>`;
+      }).join('');
+    }
+  },
+
+  // === Projects ===
+  async loadProjects() {
+    const el = document.getElementById('page-projects');
+    const projects = await this.api.get('/api/projects');
+    if (!projects) return;
+    this.state.projects = projects;
+    el.innerHTML = `
+      <div class="flex-between mb-16">
+        <div class="section-title">项目列表</div>
+        <button class="btn btn--primary" onclick="App.showProjectModal()">+ 新建项目</button>
+      </div>
+      <div class="project-grid">${projects.map(p => `
+        <div class="project-card">
+          <h3>${this.escHtml(p.name)}</h3>
+          <div class="project-repo">${this.escHtml(p.repo_url||'')}</div>
+          <div style="font-size:12px;color:var(--text-muted)">
+            安装脚本: ${this.escHtml(p.install_script||'-')}<br>
+            验证脚本: ${this.escHtml(p.verify_script||'-')}
+          </div>
+          <div class="project-actions">
+            <button class="btn btn--ghost btn--sm" onclick="App.showProjectModal(${p.id})">编辑</button>
+            <button class="btn btn--ghost btn--sm" style="color:var(--accent-red)" onclick="App.deleteProject(${p.id})">删除</button>
+            <button class="btn btn--primary btn--sm" onclick="App.startRunForProject(${p.id})">运行测试</button>
+          </div>
+        </div>`).join('')}
+      ${projects.length === 0 ? '<div class="empty-state"><div class="empty-icon">&#128193;</div><p>暂无项目，点击上方按钮创建</p></div>' : ''}
+      </div>`;
+  },
+
+  showProjectModal(id) {
+    const p = id ? this.state.projects.find(x => x.id === id) : null;
+    const title = p ? '编辑项目' : '新建项目';
+    const body = `
+      <div class="form-group"><label class="form-label">项目名称</label><input class="form-input" id="pf-name" value="${p?this.escHtml(p.name):''}"></div>
+      <div class="form-group"><label class="form-label">仓库地址</label><input class="form-input" id="pf-repo" value="${p?this.escHtml(p.repo_url||''):''}"></div>
+      <div class="form-group"><label class="form-label">安装脚本路径</label><input class="form-input" id="pf-install" value="${p?this.escHtml(p.install_script||''):''}"></div>
+      <div class="form-group"><label class="form-label">验证脚本路径</label><input class="form-input" id="pf-verify" value="${p?this.escHtml(p.verify_script||''):''}"></div>
+      <div class="form-group"><label class="form-label">配置 (JSON)</label><textarea class="form-textarea" id="pf-config">${p&&p.config?JSON.stringify(p.config,null,2):'{}'}</textarea></div>`;
+    const footer = `<button class="btn btn--ghost" onclick="App.closeModal()">取消</button>
+      <button class="btn btn--primary" onclick="App.saveProject(${id||'null'})">保存</button>`;
+    this.showModal(title, body, footer);
+  },
+
+  async saveProject(id) {
+    const data = {
+      name: document.getElementById('pf-name').value,
+      repo_url: document.getElementById('pf-repo').value,
+      install_script: document.getElementById('pf-install').value,
+      verify_script: document.getElementById('pf-verify').value,
+      config: document.getElementById('pf-config').value
+    };
+    try { data.config = JSON.parse(data.config); } catch(e) { data.config = {}; }
+    if (!data.name) { this.toast('请输入项目名称', 'error'); return; }
+    if (id) { await this.api.put('/api/projects/' + id, data); }
+    else { await this.api.post('/api/projects', data); }
+    this.closeModal();
+    this.toast(id ? '项目已更新' : '项目已创建', 'success');
+    this.loadProjects();
+  },
+
+  async deleteProject(id) {
+    if (!confirm('确定删除此项目?')) return;
+    await this.api.del('/api/projects/' + id);
+    this.toast('项目已删除', 'success');
+    this.loadProjects();
+  },
+
+  async startRunForProject(projectId) {
+    const r = await this.api.post('/api/runs', { project_id: projectId });
+    if (r && r.id) { this.toast('测试已启动', 'success'); this.navigate('run-detail', r.id); }
+  },
+
+  // === Test Runs ===
+  async loadRuns() {
+    const el = document.getElementById('page-runs');
+    const [runs, projects] = await Promise.all([this.api.get('/api/runs'), this.api.get('/api/projects')]);
+    if (!runs) return;
+    this.state.projects = projects || [];
+    el.innerHTML = `
+      <div class="flex-between mb-16">
+        <div class="section-title">测试运行列表</div>
+        <button class="btn btn--primary" onclick="App.createRun()">+ 新建测试</button>
+      </div>
+      <div class="card">
+        <table class="data-table"><thead><tr>
+          <th>ID</th><th>项目</th><th>状态</th><th>分支</th><th>重试次数</th><th>开始时间</th><th>耗时</th><th>操作</th>
+        </tr></thead><tbody>${runs.map(r => `<tr>
+          <td>#${r.id}</td><td>${this.escHtml(r.project_name||'-')}</td><td>${this.statusBadge(r.status)}</td>
+          <td style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${this.escHtml(r.branch_name||'-')}</td>
+          <td>${r.current_retry||0}/${r.retry_count||10}</td>
+          <td>${this.formatDate(r.start_time)}</td>
+          <td>${this.formatDuration(r.start_time, r.end_time)}</td>
+          <td><button class="btn btn--ghost btn--sm" onclick="App.navigate('run-detail',${r.id})">详情</button></td>
+        </tr>`).join('')}
+        ${runs.length===0?'<tr><td colspan="8" class="empty-state"><p>暂无测试运行</p></td></tr>':''}
+        </tbody></table>
+      </div>`;
+  },
+
+  async createRun() {
+    let projects = this.state.projects;
+    if (!projects || projects.length === 0) {
+      projects = await this.api.get('/api/projects');
+      this.state.projects = projects || [];
+    }
+    if (!projects || projects.length === 0) { this.toast('请先创建项目', 'error'); return; }
+    const body = `<div class="form-group"><label class="form-label">选择项目</label>
+      <select class="form-select" id="run-project">${projects.map(p => `<option value="${p.id}">${this.escHtml(p.name)}</option>`).join('')}</select></div>`;
+    const footer = `<button class="btn btn--ghost" onclick="App.closeModal()">取消</button>
+      <button class="btn btn--primary" onclick="App.submitRun()">启动测试</button>`;
+    this.showModal('新建测试运行', body, footer);
+  },
+
+  async submitRun() {
+    const pid = document.getElementById('run-project').value;
+    const r = await this.api.post('/api/runs', { project_id: parseInt(pid) });
+    this.closeModal();
+    if (r && r.id) { this.toast('测试已启动', 'success'); this.navigate('run-detail', r.id); }
+  },
+
+  // === Run Detail ===
+  async loadRunDetail(id) {
+    this.state.runDetailId = id;
+    const el = document.getElementById('page-run-detail');
+    const run = await this.api.get('/api/runs/' + id);
+    if (!run) { el.innerHTML = '<div class="empty-state"><p>运行记录不存在</p></div>'; return; }
+    const isActive = !['success','failed'].includes(run.status);
+    el.innerHTML = `
+      <div class="flex-between mb-16">
+        <div style="display:flex;align-items:center;gap:12px">
+          <button class="btn btn--ghost btn--sm" onclick="App.navigate('runs')">&larr; 返回</button>
+          <span class="section-title">测试运行 #${run.id}</span>
+          ${this.statusBadge(run.status)}
+        </div>
+        <div style="display:flex;gap:8px">
+          ${run.status==='failed'?`<button class="btn btn--primary btn--sm" onclick="App.retryRun(${run.id})">重试</button>`:''}
+        </div>
+      </div>
+      ${this.pipelineHTML(run.status)}
+      <div class="detail-grid mb-24">
+        <div class="detail-item"><div class="detail-label">项目名称</div><div class="detail-value">${this.escHtml(run.project_name||'-')}</div></div>
+        <div class="detail-item"><div class="detail-label">修复分支</div><div class="detail-value" style="font-family:'JetBrains Mono',monospace;font-size:12px">${this.escHtml(run.branch_name||'-')}</div></div>
+        <div class="detail-item"><div class="detail-label">开始时间</div><div class="detail-value">${this.formatDate(run.start_time)}</div></div>
+        <div class="detail-item"><div class="detail-label">耗时</div><div class="detail-value">${this.formatDuration(run.start_time, run.end_time)}</div></div>
+        <div class="detail-item"><div class="detail-label">重试次数</div><div class="detail-value">${run.current_retry||0} / ${run.retry_count||10}</div></div>
+        <div class="detail-item"><div class="detail-label">VM 信息</div><div class="detail-value">${run.vm_info?`${run.vm_info.ip||''} (${run.vm_info.hostname||''})`:'分配中...'}</div></div>
+      </div>
+      <div class="tabs" id="run-tabs">
+        <div class="tab active" data-tab="logs" onclick="App.switchRunTab('logs')">运行日志</div>
+        <div class="tab" data-tab="ai" onclick="App.switchRunTab('ai')">AI 分析</div>
+        <div class="tab" data-tab="verify" onclick="App.switchRunTab('verify')">验证结果</div>
+      </div>
+      <div id="run-tab-logs" class="run-tab-content">
+        <div class="log-viewer" id="log-viewer"></div>
+      </div>
+      <div id="run-tab-ai" class="run-tab-content" style="display:none"></div>
+      <div id="run-tab-verify" class="run-tab-content" style="display:none"></div>`;
+    // Load logs
+    await this.refreshRunLogs(id);
+    await this.refreshRunAI(id);
+    await this.refreshRunVerify(id);
+    // Start polling if active
+    if (isActive) {
+      this.state.polling = setInterval(async () => {
+        if (this.state.currentPage !== 'run-detail') { this.stopPolling(); return; }
+        const fresh = await this.api.get('/api/runs/' + id);
+        if (fresh) {
+          // Update status badge and pipeline
+          if (fresh.status !== run.status) { this.loadRunDetail(id); return; }
+        }
+        await this.refreshRunLogs(id);
+        await this.refreshRunAI(id);
+        await this.refreshRunVerify(id);
+      }, 3000);
+    }
+  },
+
+  switchRunTab(tab) {
+    document.querySelectorAll('#run-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+    ['logs','ai','verify'].forEach(t => {
+      const el = document.getElementById('run-tab-' + t);
+      if (el) el.style.display = t === tab ? 'block' : 'none';
+    });
+  },
+
+  async refreshRunLogs(id) {
+    const logs = await this.api.get('/api/runs/' + id + '/logs');
+    if (!logs) return;
+    const viewer = document.getElementById('log-viewer');
+    if (!viewer) return;
+    const wasAtBottom = viewer.scrollHeight - viewer.scrollTop - viewer.clientHeight < 50;
+    viewer.innerHTML = logs.map(l => {
+      let cls = 'log-line';
+      const c = l.content || '';
+      if (c.includes('ERROR') || c.includes('FATAL') || c.includes('失败')) cls += ' log-error';
+      else if (c.includes('SUCCESS') || c.includes('成功') || c.includes('通过')) cls += ' log-success';
+      else if (c.includes('WARNING') || c.includes('警告')) cls += ' log-warn';
+      else if (c.includes('[INFO]') || c.includes('>>>')) cls += ' log-info';
+      return `<div class="${cls}"><span class="log-time">[${this.formatDate(l.created_at)}]</span> <span>[${l.phase||''}]</span> ${this.escHtml(c)}</div>`;
+    }).join('');
+    if (wasAtBottom) viewer.scrollTop = viewer.scrollHeight;
+  },
+
+  async refreshRunAI(id) {
+    const el = document.getElementById('run-tab-ai');
+    if (!el) return;
+    const run = await this.api.get('/api/runs/' + id);
+    if (!run || !run.analyses || run.analyses.length === 0) {
+      el.innerHTML = '<div class="empty-state"><p>暂无 AI 分析记录</p></div>';
+      return;
+    }
+    el.innerHTML = run.analyses.map((a, i) => `
+      <div class="ai-card">
+        <h4>&#129302; AI 分析 - 第 ${a.round_number||i+1} 轮</h4>
+        <div class="ai-section"><div class="ai-section-title">根因判断</div><div class="ai-section-content">${this.escHtml(a.root_cause||'')}</div></div>
+        <div class="ai-section"><div class="ai-section-title">修复方案</div><div class="ai-section-content">${this.escHtml(a.fix_plan||'')}</div></div>
+        <div class="ai-section"><div class="ai-section-title">修改文件</div><div class="ai-section-content" style="font-family:'JetBrains Mono',monospace;font-size:12px">${(a.files_modified||[]).join(', ')||'-'}</div></div>
+        <div class="ai-section"><div class="ai-section-title">Commit Message</div><div class="ai-section-content" style="font-family:'JetBrains Mono',monospace;font-size:12px;white-space:pre-wrap;background:var(--bg-base);padding:12px;border-radius:6px">${this.escHtml(a.commit_message||'')}</div></div>
+      </div>`).join('');
+  },
+
+  async refreshRunVerify(id) {
+    const el = document.getElementById('run-tab-verify');
+    if (!el) return;
+    const run = await this.api.get('/api/runs/' + id);
+    if (!run || !run.verify_results || run.verify_results.length === 0) {
+      el.innerHTML = '<div class="empty-state"><p>暂无验证结果</p></div>';
+      return;
+    }
+    // Group by round
+    const rounds = {};
+    run.verify_results.forEach(v => { const rn = v.round_number||1; if(!rounds[rn]) rounds[rn]=[]; rounds[rn].push(v); });
+    el.innerHTML = Object.entries(rounds).map(([rn, items]) => `
+      <div class="card mb-16"><div class="card-header">第 ${rn} 轮验证</div>
+      <table class="data-table verify-table"><thead><tr><th>验证项</th><th>状态</th><th>详情</th></tr></thead>
+      <tbody>${items.map(v => `<tr>
+        <td>${this.escHtml(v.check_name||'')}</td>
+        <td class="${v.passed?'pass':'fail'}">${v.passed?'&#10003; 通过':'&#10007; 失败'}</td>
+        <td style="font-size:12px;color:var(--text-muted)">${this.escHtml(v.detail||'')}</td>
+      </tr>`).join('')}</tbody></table></div>`).join('');
+  },
+
+  async retryRun(id) {
+    const r = await this.api.post('/api/runs/' + id + '/retry');
+    if (r) { this.toast('已重新启动测试', 'success'); this.loadRunDetail(id); }
+  },
+
+  // === Reports ===
+  async loadReports() {
+    const el = document.getElementById('page-reports');
+    const runs = await this.api.get('/api/runs');
+    if (!runs) return;
+    const completedRuns = runs.filter(r => ['success','failed'].includes(r.status));
+    el.innerHTML = `
+      <div class="section-title mb-16">测试报告</div>
+      <div class="card"><table class="data-table"><thead><tr>
+        <th>运行ID</th><th>项目</th><th>状态</th><th>开始时间</th><th>耗时</th><th>操作</th>
+      </tr></thead><tbody>${completedRuns.map(r => `<tr>
+        <td>#${r.id}</td><td>${this.escHtml(r.project_name||'-')}</td><td>${this.statusBadge(r.status)}</td>
+        <td>${this.formatDate(r.start_time)}</td><td>${this.formatDuration(r.start_time,r.end_time)}</td>
+        <td><button class="btn btn--ghost btn--sm" onclick="App.navigate('report-detail',${r.id})">查看报告</button></td>
+      </tr>`).join('')}
+      ${completedRuns.length===0?'<tr><td colspan="6" class="empty-state"><p>暂无已完成的测试报告</p></td></tr>':''}
+      </tbody></table></div>`;
+  },
+
+  async loadReportDetail(id) {
+    const el = document.getElementById('page-report-detail');
+    const report = await this.api.get('/api/runs/' + id + '/report');
+    const run = await this.api.get('/api/runs/' + id);
+    if (!report || !run) { el.innerHTML = '<div class="empty-state"><p>报告不存在</p></div>'; return; }
+    el.innerHTML = `
+      <div class="flex-between mb-16">
+        <div style="display:flex;align-items:center;gap:12px">
+          <button class="btn btn--ghost btn--sm" onclick="App.navigate('reports')">&larr; 返回</button>
+          <span class="section-title">测试报告 #${id}</span>
+          ${this.statusBadge(run.status)}
+        </div>
+      </div>
+      <div class="report-section"><h3>&#128203; 测试概况</h3>
+        <div class="report-meta">
+          <div class="report-meta-item"><div class="label">项目名称</div><div class="value">${this.escHtml(run.project_name||'-')}</div></div>
+          <div class="report-meta-item"><div class="label">最终状态</div><div class="value">${this.statusLabel(run.status)}</div></div>
+          <div class="report-meta-item"><div class="label">开始时间</div><div class="value">${this.formatDate(run.start_time)}</div></div>
+          <div class="report-meta-item"><div class="label">耗时</div><div class="value">${this.formatDuration(run.start_time,run.end_time)}</div></div>
+          <div class="report-meta-item"><div class="label">VM 信息</div><div class="value">${run.vm_info?`${run.vm_info.ip} / ${run.vm_info.hostname}`:'-'}</div></div>
+          <div class="report-meta-item"><div class="label">重试次数</div><div class="value">${run.current_retry||0}</div></div>
+        </div>
+      </div>
+      <div class="report-section"><h3>&#128295; 问题与修复</h3>
+        ${(run.analyses&&run.analyses.length>0) ? run.analyses.map(a => `
+          <div class="ai-card">
+            <div class="ai-section"><div class="ai-section-title">根因判断</div><div class="ai-section-content">${this.escHtml(a.root_cause||'')}</div></div>
+            <div class="ai-section"><div class="ai-section-title">修复方案</div><div class="ai-section-content">${this.escHtml(a.fix_plan||'')}</div></div>
+            <div class="ai-section"><div class="ai-section-title">Commit</div><div class="ai-section-content" style="font-family:'JetBrains Mono',monospace;font-size:12px;white-space:pre-wrap">${this.escHtml(a.commit_message||'')}</div></div>
+          </div>`).join('') : '<p style="color:var(--text-muted)">无 AI 修复记录</p>'}
+      </div>
+      <div class="report-section"><h3>&#128202; 代码变更</h3>
+        <div class="detail-grid">
+          <div class="detail-item"><div class="detail-label">修复分支</div><div class="detail-value" style="font-family:'JetBrains Mono',monospace;font-size:12px">${this.escHtml(run.branch_name||'-')}</div></div>
+        </div>
+      </div>
+      <div class="report-section"><h3>&#9989; 验证结果</h3>
+        ${(run.verify_results&&run.verify_results.length>0) ? `
+          <div class="card"><table class="data-table verify-table"><thead><tr><th>轮次</th><th>验证项</th><th>状态</th><th>详情</th></tr></thead>
+          <tbody>${run.verify_results.map(v => `<tr>
+            <td>${v.round_number||1}</td><td>${this.escHtml(v.check_name||'')}</td>
+            <td class="${v.passed?'pass':'fail'}">${v.passed?'通过':'失败'}</td>
+            <td style="font-size:12px">${this.escHtml(v.detail||'')}</td>
+          </tr>`).join('')}</tbody></table></div>` : '<p style="color:var(--text-muted)">无验证记录</p>'}
+      </div>`;
+  },
+
+  // === Settings ===
+  async loadSettings() {
+    const el = document.getElementById('page-settings');
+    const cfg = await this.api.get('/api/settings/notify');
+    el.innerHTML = `
+      <div class="section-title mb-16">系统设置</div>
+      <div class="card" style="max-width:600px">
+        <div class="card-header">微信通知配置</div>
+        <div style="padding:20px">
+          <div class="form-group"><label class="form-label">Webhook 地址</label>
+            <input class="form-input" id="set-webhook" value="${cfg?this.escHtml(cfg.webhook_url||''):''}"></div>
+          <div class="form-group" style="display:flex;gap:20px">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+              <input type="checkbox" id="set-enabled" ${cfg&&cfg.enabled?'checked':''}> 启用通知
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+              <input type="checkbox" id="set-success" ${cfg&&cfg.notify_on_success?'checked':''}> 成功通知
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+              <input type="checkbox" id="set-failure" ${cfg&&cfg.notify_on_failure?'checked':''}> 失败通知
+            </label>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn--primary" onclick="App.saveSettings()">保存设置</button>
+            <button class="btn btn--ghost" onclick="App.testNotify()">测试通知</button>
+          </div>
+        </div>
+      </div>
+      <div class="card mt-16" style="max-width:600px">
+        <div class="card-header">超时与重试配置</div>
+        <div style="padding:20px">
+          <div class="detail-grid">
+            <div class="detail-item"><div class="detail-label">单步超时</div><div class="detail-value">30 分钟</div></div>
+            <div class="detail-item"><div class="detail-label">整体超时</div><div class="detail-value">4 小时</div></div>
+            <div class="detail-item"><div class="detail-label">最大重试次数</div><div class="detail-value">10 次</div></div>
+            <div class="detail-item"><div class="detail-label">AI 修改范围</div><div class="detail-value">scripts/ config/</div></div>
+          </div>
+        </div>
+      </div>`;
+  },
+
+  async saveSettings() {
+    await this.api.put('/api/settings/notify', {
+      webhook_url: document.getElementById('set-webhook').value,
+      enabled: document.getElementById('set-enabled').checked,
+      notify_on_success: document.getElementById('set-success').checked,
+      notify_on_failure: document.getElementById('set-failure').checked
+    });
+    this.toast('设置已保存', 'success');
+  },
+
+  async testNotify() {
+    const r = await this.api.post('/api/notify/test', {});
+    this.toast(r && r.message ? r.message : '通知已发送', 'info');
+  },
+
+  // === Helpers ===
+  escHtml(s) {
+    if (!s) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  },
+
+  init() {
+    this.navigate('dashboard');
+  }
+};
+
+App.init();
+</script>
+</body>
+</html>
