@@ -2,7 +2,7 @@
 Flask application for AI Automated Experiment Platform (AI自动化实验平台)
 """
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, request, render_template
 from flask_cors import CORS
@@ -105,7 +105,7 @@ def _ts(base, delta_seconds):
 
 def _seed_run_success(project, app):
     """A clean first-run success with no AI fixes needed."""
-    start = datetime.utcnow() - timedelta(hours=3)
+    start = datetime.now(timezone.utc) - timedelta(hours=3)
     run = TestRun(
         project_id=project.id,
         status="success",
@@ -161,7 +161,7 @@ def _seed_run_success(project, app):
 
 def _seed_run_success_with_fix(project, app):
     """Run that failed on round 1, AI fixed it, succeeded on round 2."""
-    start = datetime.utcnow() - timedelta(hours=1, minutes=30)
+    start = datetime.now(timezone.utc) - timedelta(hours=1, minutes=30)
     run = TestRun(
         project_id=project.id,
         status="success",
@@ -246,7 +246,7 @@ def _seed_run_success_with_fix(project, app):
 
 def _seed_run_failed(project, app):
     """Run that exhausted retries and was rolled back."""
-    start = datetime.utcnow() - timedelta(minutes=45)
+    start = datetime.now(timezone.utc) - timedelta(minutes=45)
     run = TestRun(
         project_id=project.id,
         status="failed",
@@ -319,7 +319,7 @@ def _seed_run_failed(project, app):
 
 def _seed_run_inprogress(project):
     """A run currently in-progress (status=install, no workflow thread – just for UI demo)."""
-    start = datetime.utcnow() - timedelta(minutes=5)
+    start = datetime.now(timezone.utc) - timedelta(minutes=5)
     run = TestRun(
         project_id=project.id,
         status="install",
@@ -461,7 +461,7 @@ def _register_routes(app):
             retry_count=data.get("retry_count", 10),
             current_retry=0,
             vm_info={},
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         db.session.add(run)
         db.session.flush()

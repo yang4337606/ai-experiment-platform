@@ -23,7 +23,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -326,7 +326,7 @@ class VMwareManager:
             vmx_path=dest_vmx,
             template_vmx=template_vmx,
             state=VMState.STOPPED.value,
-            created_at=datetime.utcnow().isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
         )
 
         if self._simulation:
