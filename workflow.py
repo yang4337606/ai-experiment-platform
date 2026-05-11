@@ -441,9 +441,58 @@ class WorkflowEngine:
     # Credit monitoring & account pool (设计文档 4.4.4)
     # ------------------------------------------------------------------
 
+    def _query_real_balance(self, session, run, acct, round_number):
+        """Query the real credit balance from the provider API.
+
+        Updates acct.credit_balance in DB if the query succeeds.
+        Returns (queried: bool, balance: float).
+        """
+        from models import decrypt_value
+        from credit_checker import query_credit_balance
+
+        try:
+            api_key = decrypt_value(acct.encrypted_secret)
+        except Exception:
+            self._add_log(session, run, "ai_analyze",
+                f"[积分查询] {acct.service_type}/{acct.account} 密钥解密失败，使用本地余额",
+                "credit", round_number)
+            return False, acct.credit_balance
+
+        extra = acct.extra or {}
+        api_base = extra.get("api_base", "")
+
+        self._add_log(session, run, "ai_analyze",
+            f"[积分查询] 正在查询 {acct.service_type}/{acct.account} 真实余额...",
+            "credit", round_number)
+
+        result = query_credit_balance(acct.service_type, api_key, api_base, extra)
+
+        if result.success:
+            old_balance = acct.credit_balance
+            acct.credit_balance = result.balance
+            session.commit()
+            self._add_log(session, run, "ai_analyze",
+                f"[积分查询] {acct.service_type}/{acct.account} "
+                f"真实余额: {result.balance:.2f} {result.currency}"
+                f" (本地记录: {old_balance:.1f} → 已同步)",
+                "credit", round_number)
+            return True, result.balance
+        else:
+            self._add_log(session, run, "ai_analyze",
+                f"[积分查询] {acct.service_type}/{acct.account} "
+                f"查询失败 ({result.error})，使用本地余额 {acct.credit_balance:.1f}",
+                "credit", round_number)
+            return False, acct.credit_balance
+
     def _select_ai_account(self, session, run, round_number):
         """
         Select the best available AI account following the failover chain.
+
+        Strategy (两者结合):
+          1. Pre-call: Try to query provider API for real balance
+          2. If query fails, fall back to locally stored credit_balance
+          3. Post-call: check_error_is_credit_exhausted() handles API errors
+
         Returns a ServiceCredential or None.
         """
         from models import ServiceCredential, CreditLog
@@ -452,17 +501,19 @@ class WorkflowEngine:
                 service_type=service_type, enabled=True
             ).order_by(ServiceCredential.priority).all()
             for acct in accounts:
-                if acct.credit_balance >= acct.credit_threshold:
-                    # Check if we're switching from a different account
+                # --- Strategy 1: Query real balance from provider API ---
+                queried, real_balance = self._query_real_balance(
+                    session, run, acct, round_number)
+
+                if real_balance >= acct.credit_threshold:
+                    # Account has sufficient credits
                     if self._current_credential and self._current_credential.id != acct.id:
                         self._add_log(session, run, "ai_analyze",
                             f"[账户切换] {self._current_credential.service_type}/{self._current_credential.account}"
                             f" -> {acct.service_type}/{acct.account} (积分不足，自动切换)",
                             "account_switch", round_number)
-                        # Save progress context for continuity
                         self._save_progress_context(session, run, round_number,
                                                     self._current_credential, acct)
-                        # Log the switch event
                         switch_log = CreditLog(
                             credential_id=acct.id, run_id=run.id,
                             event_type="switch",
@@ -474,15 +525,56 @@ class WorkflowEngine:
                     self._current_credential = acct
                     return acct
                 else:
-                    # Low balance alert
+                    source = "API查询" if queried else "本地记录"
                     self._add_log(session, run, "ai_analyze",
-                        f"[积分告警] {service_type}/{acct.account} 积分余额 {acct.credit_balance:.1f}"
-                        f" 低于阈值 {acct.credit_threshold:.1f}，跳过",
+                        f"[积分告警] {service_type}/{acct.account} "
+                        f"余额 {real_balance:.1f} 低于阈值 {acct.credit_threshold:.1f}"
+                        f" ({source})，跳过",
                         "credit", round_number)
         return None
 
+    def _handle_credit_error_from_response(self, session, run, credential,
+                                            status_code, response_body, round_number):
+        """Post-call check: detect credit exhaustion from API error response.
+
+        If the error indicates insufficient credits, mark the credential and
+        raise CreditExhaustedError if no other accounts are available.
+        """
+        from credit_checker import check_error_is_credit_exhausted
+        from models import CreditLog
+
+        if not check_error_is_credit_exhausted(status_code, response_body):
+            return  # Not a credit issue
+
+        self._add_log(session, run, "ai_analyze",
+            f"[积分耗尽] {credential.service_type}/{credential.account} "
+            f"API 返回积分不足 (HTTP {status_code})",
+            "credit", round_number)
+
+        # Mark this account as depleted
+        credential.credit_balance = 0
+        session.add(CreditLog(
+            credential_id=credential.id, run_id=run.id,
+            event_type="alert",
+            amount=0, balance_after=0,
+            detail=f"API 返回积分不足 (HTTP {status_code})，余额归零",
+        ))
+        session.commit()
+
+        # Try to find another account
+        self._current_credential = None
+        next_acct = self._select_ai_account(session, run, round_number)
+        if not next_acct:
+            raise CreditExhaustedError(
+                f"{credential.service_type}/{credential.account} 积分耗尽"
+                f"，且无其他可用账户")
+
     def _deduct_credit(self, session, run, credential, amount, round_number):
-        """Deduct credits and log the event."""
+        """Deduct credits and log the event.
+
+        After deduction, re-query real balance if possible to keep
+        the local record in sync.
+        """
         from models import CreditLog
         credential.credit_balance = max(0, credential.credit_balance - amount)
         credential.last_used_at = datetime.now(timezone.utc)
@@ -490,14 +582,24 @@ class WorkflowEngine:
             credential_id=credential.id, run_id=run.id,
             event_type="deduct", amount=amount,
             balance_after=credential.credit_balance,
-            detail=f"第{round_number}轮 AI 调用消耗 {amount} 积分",
+            detail=f"第{round_number}轮 AI 调用消耗约 {amount} 积分",
         )
         session.add(log)
         session.commit()
-        self._add_log(session, run, "ai_analyze",
-            f"[积分] {credential.service_type}/{credential.account} "
-            f"消耗 {amount} 积分，剩余 {credential.credit_balance:.1f}",
-            "credit", round_number)
+
+        # Re-query real balance to sync local record
+        queried, real_balance = self._query_real_balance(
+            session, run, credential, round_number)
+        if queried:
+            self._add_log(session, run, "ai_analyze",
+                f"[积分] {credential.service_type}/{credential.account} "
+                f"调用后真实余额: {real_balance:.2f}",
+                "credit", round_number)
+        else:
+            self._add_log(session, run, "ai_analyze",
+                f"[积分] {credential.service_type}/{credential.account} "
+                f"消耗约 {amount} 积分，本地记录余额: {credential.credit_balance:.1f}",
+                "credit", round_number)
 
     def _save_progress_context(self, session, run, round_number, from_cred, to_cred):
         """Save conversation context when switching accounts (进度同步机制)."""

@@ -666,6 +666,42 @@ def _register_routes(app):
         db.session.commit()
         return jsonify(cred.to_dict())
 
+    @app.route("/api/credits/<int:cred_id>/query", methods=["POST"])
+    def query_credit_real(cred_id):
+        """Query real credit balance from the provider API."""
+        from credit_checker import query_credit_balance
+        cred = ServiceCredential.query.get_or_404(cred_id)
+        try:
+            api_key = decrypt_value(cred.encrypted_secret)
+        except Exception:
+            return jsonify({"error": "密钥解密失败", "success": False}), 400
+        extra = cred.extra or {}
+        result = query_credit_balance(cred.service_type, api_key,
+                                       extra.get("api_base", ""), extra)
+        if result.success:
+            old_balance = cred.credit_balance
+            cred.credit_balance = result.balance
+            log = CreditLog(
+                credential_id=cred.id, event_type="query",
+                amount=0, balance_after=result.balance,
+                detail=f"API 查询余额: {old_balance:.1f} → {result.balance:.2f} {result.currency}",
+            )
+            db.session.add(log)
+            db.session.commit()
+            return jsonify({
+                "success": True,
+                "balance": result.balance,
+                "currency": result.currency,
+                "old_balance": old_balance,
+                "credential": cred.to_dict(),
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": result.error,
+                "local_balance": cred.credit_balance,
+            })
+
     @app.route("/api/credits/logs", methods=["GET"])
     def credit_logs():
         page = request.args.get("page", 1, type=int)
