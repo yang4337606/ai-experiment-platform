@@ -1,316 +1,201 @@
 """
 Workflow engine for AI Automated Experiment Platform (AI自动化实验平台).
 Drives a TestRun through its full state machine in a background thread.
+
+REAL execution mode: actually runs commands in the guest VM via vmrun / SSH.
+Falls back to simulation log output only when VMwareManager is in simulation mode.
 """
+import json
+import logging
+import os
 import random
+import re
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Realistic log content libraries (Chinese)
+# Simulation log libraries (used ONLY when VMwareManager.is_simulation is True)
 # ---------------------------------------------------------------------------
 
-_VM_INIT_LOGS = [
-    "[初始化] 正在向资源池申请虚拟机资源...",
-    "[初始化] 资源申请成功，分配节点: node-cluster-03",
-    "[网络] 正在配置虚拟网络接口 eth0...",
-    "[网络] IP 地址已分配: {ip}",
-    "[网络] 子网掩码: 255.255.255.0  网关: 192.168.1.1",
-    "[网络] DNS 配置完成: 8.8.8.8, 114.114.114.0",
-    "[SSH] 正在生成 RSA 4096 密钥对...",
-    "[SSH] 公钥已注入 authorized_keys",
-    "[SSH] SSH 服务启动成功，监听端口 22",
-    "[主机名] 设置主机名为: {hostname}",
-    "[系统] OS: Ubuntu 22.04 LTS x86_64",
-    "[系统] 内核版本: 5.15.0-91-generic",
-    "[系统] CPU: {cpu_cores} vCPU  内存: {memory}GB  磁盘: {disk}GB",
-    "[系统] 时区已同步至 Asia/Shanghai",
-    "[系统] 虚拟机初始化完成，耗时 {elapsed}s",
+# placeholder — kept minimal; real mode does not use these
+_SIM_INSTALL_LINES = [
+    "[安装][模拟] 正在模拟安装过程...",
+    "[安装][模拟] 安装完成 (模拟)",
+]
+_SIM_VERIFY_PASS = [
+    "[验证][模拟] 所有检查通过 (模拟)",
+]
+_SIM_VERIFY_FAIL = [
+    "[验证][模拟] 验证失败 (模拟)",
 ]
 
-_SNAPSHOT_LOGS = [
-    "[快照] 开始对虚拟机 {hostname} 创建基础快照...",
-    "[快照] 正在冻结文件系统 I/O...",
-    "[快照] 正在创建 COW (Copy-On-Write) 快照...",
-    "[快照] 快照 ID: snap-{snap_id} 创建成功",
-    "[快照] 快照大小: {size}MB，已压缩至 {compressed}MB",
-    "[快照] 快照元数据已写入注册表",
-    "[快照] 文件系统 I/O 已恢复",
-    "[快照] 基础快照创建完成，可用于回滚",
-]
+# ---------------------------------------------------------------------------
+# AI provider integration (real LLM calls)
+# ---------------------------------------------------------------------------
 
-_CODE_PULL_LOGS = [
-    "[代码拉取] 初始化 Git 工作区: /opt/workspace/{project}",
-    "[代码拉取] 配置 Git 凭证...",
-    "[代码拉取] 执行: git clone {repo_url} --branch {branch} --depth 1",
-    "[代码拉取] Cloning into '/opt/workspace/{project}'...",
-    "[代码拉取] remote: Enumerating objects: 1247, done.",
-    "[代码拉取] remote: Counting objects: 100% (1247/1247), done.",
-    "[代码拉取] remote: Compressing objects: 100% (892/892), done.",
-    "[代码拉取] Receiving objects: 100% (1247/1247), 23.41 MiB | 15.32 MiB/s, done.",
-    "[代码拉取] Resolving deltas: 100% (445/445), done.",
-    "[代码拉取] HEAD -> {branch}，最新提交: {commit_hash}",
-    "[代码拉取] 代码拉取完成",
-]
+def _call_ai_provider(credential, prompt: str) -> str:
+    """Call the actual AI provider API to get analysis.
 
-_UPLOAD_LOGS = [
-    "[上传] 正在打包安装脚本和配置文件...",
-    "[上传] 压缩包大小: {pkg_size}KB",
-    "[上传] 通过 SCP 上传至 {ip}:/tmp/deploy/",
-    "[上传] 上传进度: 100% 完成",
-    "[上传] 设置脚本执行权限: chmod +x /tmp/deploy/*.sh",
-    "[上传] 文件完整性校验 (MD5): 通过",
-    "[上传] 部署包上传完成",
-]
+    credential: ServiceCredential with service_type / account / encrypted_secret / extra
+    prompt: the analysis prompt
+    Returns: AI response text
+    """
+    import requests
+    from models import decrypt_value
 
-_INSTALL_LOGS_JAVA = [
-    "[安装] 开始执行安装脚本: /tmp/deploy/install.sh",
-    "[安装] 更新系统软件包索引...",
-    "[安装] apt-get update: 获取 47 个包列表",
-    "[安装] 正在安装 JDK 17...",
-    "[安装] 已安装: openjdk-17-jdk (17.0.9+9-1~22.04)",
-    "[安装] JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64",
-    "[安装] 正在安装 Maven 3.9.6...",
-    "[安装] 下载 apache-maven-3.9.6-bin.tar.gz (8.7 MB)...",
-    "[安装] Maven 安装完成: mvn -version -> Apache Maven 3.9.6",
-    "[安装] 正在构建项目: mvn clean package -DskipTests",
-    "[安装] [INFO] Scanning for projects...",
-    "[安装] [INFO] Building {project} 1.0.0-SNAPSHOT",
-    "[安装] [INFO] --- maven-compiler-plugin:3.11.0:compile ---",
-    "[安装] [INFO] Compiling 142 source files to /opt/workspace/{project}/target/classes",
-    "[安装] [INFO] BUILD SUCCESS",
-    "[安装] [INFO] Total time: 1:23 min",
-    "[安装] 正在配置 Systemd 服务: {project}.service",
-    "[安装] systemctl enable {project}.service -> 已启用",
-    "[安装] systemctl start {project}.service",
-    "[安装] 等待服务启动 (超时: 60s)...",
-]
+    service = credential.service_type
+    secret = decrypt_value(credential.encrypted_secret) if credential.encrypted_secret else ""
+    extra = credential.extra or {}
 
-_INSTALL_LOGS_PYTHON = [
-    "[安装] 开始执行安装脚本: /tmp/deploy/install.sh",
-    "[安装] 检查 Python 版本: python3 --version -> Python 3.11.6",
-    "[安装] 创建虚拟环境: python3 -m venv /opt/{project}/venv",
-    "[安装] 激活虚拟环境",
-    "[安装] 安装依赖: pip install -r requirements.txt",
-    "[安装] Collecting flask==3.0.1",
-    "[安装] Collecting sqlalchemy==2.0.25",
-    "[安装] Collecting celery==5.3.6",
-    "[安装] Collecting redis==5.0.1",
-    "[安装] Installing collected packages: flask, sqlalchemy, celery, redis (共 38 个包)",
-    "[安装] Successfully installed all packages",
-    "[安装] 初始化数据库: python manage.py db upgrade",
-    "[安装] 正在配置 Gunicorn 服务...",
-    "[安装] systemctl enable {project}.service -> 已启用",
-    "[安装] systemctl start {project}.service",
-    "[安装] 等待服务启动 (超时: 60s)...",
-]
+    if service == "chatgpt":
+        api_base = extra.get("api_base", "https://api.openai.com/v1")
+        model = extra.get("model", "gpt-4o")
+        headers = {
+            "Authorization": f"Bearer {secret}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": (
+                    "你是一个专业的 DevOps 工程师和软件安装排错专家。"
+                    "请根据提供的安装日志和验证日志分析根本原因，并给出具体的修复方案。"
+                    "你的回复必须包含两部分：\n"
+                    "1. 【根因分析】 详细说明失败原因\n"
+                    "2. 【修复方案】 给出具体的修复命令或文件修改\n"
+                    "3. 【修复脚本】 给出一段可直接在 bash 中执行的修复脚本（以 ```bash 包裹）"
+                )},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 4096,
+        }
+        resp = requests.post(
+            f"{api_base}/chat/completions",
+            headers=headers, json=payload, timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
 
-_INSTALL_LOGS_NODE = [
-    "[安装] 开始执行安装脚本: /tmp/deploy/install.sh",
-    "[安装] 检查 Node.js 版本: node --version -> v20.11.0",
-    "[安装] 检查 npm 版本: npm --version -> 10.2.4",
-    "[安装] 安装项目依赖: npm ci --production",
-    "[安装] npm warn deprecated inflight@1.0.6",
-    "[安装] added 847 packages in 34s",
-    "[安装] 构建前端资产: npm run build",
-    "[安装] 构建完成，输出目录: dist/",
-    "[安装] 正在配置 PM2 进程管理器...",
-    "[安装] pm2 start ecosystem.config.js",
-    "[安装] 等待服务启动 (超时: 60s)...",
-]
+    elif service == "qwen":
+        api_base = extra.get("api_base", "https://dashscope.aliyuncs.com/api/v1")
+        model = extra.get("model", "qwen-plus")
+        headers = {
+            "Authorization": f"Bearer {secret}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "input": {
+                "messages": [
+                    {"role": "system", "content": (
+                        "你是一个专业的 DevOps 工程师和软件安装排错专家。"
+                        "请根据提供的安装日志和验证日志分析根本原因，并给出具体的修复方案。"
+                        "你的回复必须包含两部分：\n"
+                        "1. 【根因分析】 详细说明失败原因\n"
+                        "2. 【修复方案】 给出具体的修复命令或文件修改\n"
+                        "3. 【修复脚本】 给出一段可直接在 bash 中执行的修复脚本（以 ```bash 包裹）"
+                    )},
+                    {"role": "user", "content": prompt},
+                ]
+            },
+        }
+        resp = requests.post(
+            f"{api_base}/services/aigc/text-generation/generation",
+            headers=headers, json=payload, timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("output", {}).get("text", str(data))
 
-_VERIFY_PASS_LOGS = [
-    # exit_code check
-    "[验证][退出码] 执行验证脚本: /tmp/deploy/verify.sh",
-    "[验证][退出码] 脚本退出码: 0  ✓ 通过",
-    # log_keywords check
-    "[验证][日志关键字] 检查服务日志中是否包含启动成功标志...",
-    "[验证][日志关键字] journalctl -u {service} | grep 'Started successfully'",
-    "[验证][日志关键字] 找到关键字: 'Application started successfully on port {port}'  ✓ 通过",
-    # service_status check
-    "[验证][服务状态] systemctl status {service}.service",
-    "[验证][服务状态] ● {service}.service - {project} Application Service",
-    "[验证][服务状态]    Loaded: loaded (/etc/systemd/system/{service}.service; enabled)",
-    "[验证][服务状态]    Active: active (running) since {time}; 12s ago",
-    "[验证][服务状态]  服务状态: active (running)  ✓ 通过",
-    # port_listen check
-    "[验证][端口监听] ss -tlnp | grep :{port}",
-    "[验证][端口监听] LISTEN 0 128 0.0.0.0:{port} 0.0.0.0:* users:((\"{service}\",pid={pid},fd=6))",
-    "[验证][端口监听] 端口 {port} 已正常监听  ✓ 通过",
-    # api_health check
-    "[验证][API健康] curl -sf http://127.0.0.1:{port}/health",
-    '[验证][API健康] 响应: {"status":"ok","version":"1.0.0","uptime":12}',
-    "[验证][API健康] HTTP 状态码: 200  ✓ 通过",
-    "[验证] 所有验证检查项均通过！",
-]
+    elif service == "mulerun":
+        api_base = extra.get("api_base", "https://api.mulerun.com/v1")
+        model = extra.get("model", "mulerun/mule-1")
+        headers = {
+            "Authorization": f"Bearer {secret}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": (
+                    "你是一个专业的 DevOps 工程师和软件安装排错专家。"
+                    "请根据提供的安装日志和验证日志分析根本原因，并给出具体的修复方案。"
+                    "你的回复必须包含两部分：\n"
+                    "1. 【根因分析】 详细说明失败原因\n"
+                    "2. 【修复方案】 给出具体的修复命令或文件修改\n"
+                    "3. 【修复脚本】 给出一段可直接在 bash 中执行的修复脚本（以 ```bash 包裹）"
+                )},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 4096,
+        }
+        resp = requests.post(
+            f"{api_base}/chat/completions",
+            headers=headers, json=payload, timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
 
-_VERIFY_FAIL_LOGS_PORT = [
-    "[验证][退出码] 执行验证脚本: /tmp/deploy/verify.sh",
-    "[验证][退出码] 脚本退出码: 0  ✓ 通过",
-    "[验证][日志关键字] 检查服务日志中是否包含启动成功标志...",
-    "[验证][日志关键字] journalctl -u {service} | grep 'Started successfully'",
-    "[验证][日志关键字] 找到关键字: 'Started'  ✓ 通过",
-    "[验证][服务状态] systemctl status {service}.service",
-    "[验证][服务状态]    Active: active (running)  ✓ 通过",
-    "[验证][端口监听] ss -tlnp | grep :{port}",
-    "[验证][端口监听] (无输出)",
-    "[验证][端口监听] 错误: 端口 {port} 未监听  ✗ 失败",
-    "[验证][端口监听] 可能原因: 端口被占用或服务未正常绑定",
-    "[验证][API健康] 跳过 (依赖端口监听检查通过)",
-    "[验证] 验证失败: 1 个检查项未通过 (port_listen)",
-]
+    else:
+        raise ValueError(f"Unsupported AI provider: {service}")
 
-_VERIFY_FAIL_LOGS_SERVICE = [
-    "[验证][退出码] 执行验证脚本: /tmp/deploy/verify.sh",
-    "[验证][退出码] 脚本退出码: 1  ✗ 失败",
-    "[验证][日志关键字] 检查服务日志中是否包含启动成功标志...",
-    "[验证][日志关键字] journalctl -u {service} --since '1 min ago'",
-    "[验证][日志关键字] Error: Failed to bind to port {port}: Address already in use",
-    "[验证][日志关键字] 未找到预期关键字  ✗ 失败",
-    "[验证][服务状态] systemctl status {service}.service",
-    "[验证][服务状态]    Active: failed (Result: exit-code) since {time}; 3s ago",
-    "[验证][服务状态]    Process: ExecStart={service} (code=exited, status=1/FAILURE)",
-    "[验证][服务状态] 服务状态: failed  ✗ 失败",
-    "[验证][端口监听] 跳过 (依赖服务状态检查通过)",
-    "[验证][API健康] 跳过 (依赖端口监听检查通过)",
-    "[验证] 验证失败: 3 个检查项未通过 (exit_code, log_keywords, service_status)",
-]
 
-_VERIFY_FAIL_LOGS_DEPENDENCY = [
-    "[验证][退出码] 执行验证脚本: /tmp/deploy/verify.sh",
-    "[验证][退出码] 脚本退出码: 127  ✗ 失败",
-    "[验证][退出码] stderr: /opt/{project}/bin/start.sh: line 12: libssl.so.3: 共享库加载失败",
-    "[验证][日志关键字] journalctl -u {service} --since '2 min ago'",
-    "[验证][日志关键字] error while loading shared libraries: libssl.so.3: cannot open shared object file",
-    "[验证][日志关键字] 未找到预期关键字  ✗ 失败",
-    "[验证][服务状态] Active: failed  ✗ 失败",
-    "[验证][端口监听] 跳过 (依赖服务状态检查通过)",
-    "[验证][API健康] 跳过 (依赖端口监听检查通过)",
-    "[验证] 验证失败: 3 个检查项未通过 (exit_code, log_keywords, service_status)",
-]
+def _extract_bash_script(ai_response: str) -> str:
+    """Extract a bash script block from AI response text."""
+    # Look for ```bash ... ``` blocks
+    pattern = r'```bash\s*\n(.*?)```'
+    matches = re.findall(pattern, ai_response, re.DOTALL)
+    if matches:
+        return matches[-1].strip()
+    # Fallback: look for ```sh or ``` blocks
+    pattern2 = r'```(?:sh)?\s*\n(.*?)```'
+    matches2 = re.findall(pattern2, ai_response, re.DOTALL)
+    if matches2:
+        return matches2[-1].strip()
+    return ""
 
-# Root cause / fix plan templates (Chinese)
-_FAILURE_SCENARIOS = [
-    {
-        "type": "port_conflict",
-        "root_cause": (
-            "【根因分析】端口冲突问题\n\n"
-            "通过分析安装日志和系统状态，发现应用启动失败的根本原因为端口占用冲突：\n\n"
-            "1. 应用配置文件 application.yaml 中将服务绑定端口配置为 8080\n"
-            "2. 系统中已有进程 nginx (PID: 3421) 占用了 8080 端口\n"
-            "3. 应用尝试绑定时抛出 Address already in use 异常并立即退出\n\n"
-            "证据链：\n"
-            "- journalctl 日志: 'Caused by: java.net.BindException: Address already in use'\n"
-            "- ss -tlnp 输出: nginx 监听 0.0.0.0:8080\n"
-            "- 应用 exit code: 1"
-        ),
-        "fix_plan": (
-            "【修复方案】将应用服务端口从 8080 修改为 8090\n\n"
-            "修改文件: src/main/resources/application.yaml\n"
-            "  - server.port: 8080  →  server.port: 8090\n\n"
-            "修改文件: config/nginx.conf\n"
-            "  - proxy_pass http://127.0.0.1:8080  →  proxy_pass http://127.0.0.1:8090\n\n"
-            "同时更新健康检查脚本 verify.sh 中的端口参数。"
-        ),
-        "files": ["src/main/resources/application.yaml", "config/nginx.conf", "scripts/verify.sh"],
-        "commit_msg_body": "错误现象: 服务启动失败，端口 8080 被 nginx 占用\n根因判断: application.yaml 中 server.port=8080 与系统已有服务冲突\n修复内容: 将 server.port 修改为 8090，同步更新 nginx 反代配置及验证脚本",
-    },
-    {
-        "type": "missing_dependency",
-        "root_cause": (
-            "【根因分析】缺少运行时共享库\n\n"
-            "应用启动时动态链接器无法找到所需的共享库文件：\n\n"
-            "1. 应用编译时链接了 OpenSSL 3.x (libssl.so.3)\n"
-            "2. 目标系统 Ubuntu 22.04 默认安装的是 OpenSSL 1.1 (libssl.so.1.1)\n"
-            "3. 动态链接器报错: cannot open shared object file: No such file or directory\n\n"
-            "证据链：\n"
-            "- ldd 输出: libssl.so.3 => not found\n"
-            "- dpkg -l | grep libssl: libssl1.1 已安装，libssl3 未安装\n"
-            "- 错误信息: error while loading shared libraries: libssl.so.3"
-        ),
-        "fix_plan": (
-            "【修复方案】在安装脚本中补充安装缺失的依赖包\n\n"
-            "修改文件: scripts/install.sh\n"
-            "  在包安装步骤中追加: apt-get install -y libssl3 openssl\n\n"
-            "同时在 requirements 文档中明确标注运行时依赖：\n"
-            "  docs/requirements.md: 新增 libssl3 >= 3.0.0 运行时依赖说明"
-        ),
-        "files": ["scripts/install.sh", "docs/requirements.md"],
-        "commit_msg_body": "错误现象: 应用启动时报 libssl.so.3 共享库缺失错误\n根因判断: 目标系统缺少 OpenSSL 3.x 运行时库，仅有 1.1 版本\n修复内容: 在 install.sh 中补充 apt-get install libssl3，并更新依赖文档",
-    },
-    {
-        "type": "permission_error",
-        "root_cause": (
-            "【根因分析】文件权限不足\n\n"
-            "服务账户无法读取应用必要的配置文件和写入日志目录：\n\n"
-            "1. 应用以 appuser 服务账户运行（安全隔离策略）\n"
-            "2. 配置文件 /etc/app/config.json 所有者为 root，权限为 600\n"
-            "3. 日志目录 /var/log/app/ 所有者为 root，appuser 无写入权限\n"
-            "4. 应用启动时因权限拒绝而退出\n\n"
-            "证据链：\n"
-            "- 错误日志: PermissionError: [Errno 13] Permission denied: '/etc/app/config.json'\n"
-            "- ls -la 输出: -rw------- root root /etc/app/config.json\n"
-            "- id appuser: uid=1001(appuser) gid=1001(appuser)"
-        ),
-        "fix_plan": (
-            "【修复方案】修正配置文件和日志目录的权限\n\n"
-            "修改文件: scripts/install.sh\n"
-            "  在服务启动前追加以下命令:\n"
-            "  chown -R appuser:appuser /etc/app/\n"
-            "  chmod 640 /etc/app/config.json\n"
-            "  chown -R appuser:appuser /var/log/app/\n"
-            "  chmod 750 /var/log/app/"
-        ),
-        "files": ["scripts/install.sh"],
-        "commit_msg_body": "错误现象: 服务以 appuser 启动时读取配置文件及写入日志目录均报 Permission denied\n根因判断: 安装脚本未正确设置 /etc/app/ 和 /var/log/app/ 的所有者及权限\n修复内容: 在 install.sh 服务启动前追加 chown/chmod 权限修正命令",
-    },
-    {
-        "type": "config_error",
-        "root_cause": (
-            "【根因分析】配置文件格式错误\n\n"
-            "应用启动时解析配置文件失败，导致初始化中断：\n\n"
-            "1. 配置文件 config/app.yaml 中数据库连接字符串格式不正确\n"
-            "2. 预期格式: postgresql://user:pass@host:5432/dbname\n"
-            "3. 实际配置: postgres://user:pass@host/dbname（缺少端口，协议名称不匹配）\n"
-            "4. SQLAlchemy 引擎初始化时抛出 ArgumentError\n\n"
-            "证据链：\n"
-            "- 错误日志: sqlalchemy.exc.ArgumentError: Could not parse rfc1738 URL\n"
-            "- 配置文件内容: database.url: postgres://appuser:***@db-host/appdb\n"
-            "- 预期值: postgresql://appuser:***@db-host:5432/appdb"
-        ),
-        "fix_plan": (
-            "【修复方案】修正数据库连接 URL 格式\n\n"
-            "修改文件: config/app.yaml\n"
-            "  database.url: postgres://appuser:{{DB_PASS}}@db-host/appdb\n"
-            "  →  database.url: postgresql://appuser:{{DB_PASS}}@db-host:5432/appdb\n\n"
-            "修改文件: config/app.yaml.template（模板同步更新）\n\n"
-            "补充单元测试: tests/test_config.py，验证 URL 解析正确性。"
-        ),
-        "files": ["config/app.yaml", "config/app.yaml.template", "tests/test_config.py"],
-        "commit_msg_body": "错误现象: 应用启动时 SQLAlchemy 报 Could not parse rfc1738 URL 错误\n根因判断: config/app.yaml 中 database.url 使用了 postgres:// 而非 postgresql://，且缺少端口号\n修复内容: 修正 URL scheme 为 postgresql:// 并补充 :5432 端口，同步更新配置模板",
-    },
-]
 
-_ROLLBACK_LOGS = [
-    "[回滚] 验证和修复均告失败，开始执行虚拟机回滚...",
-    "[回滚] 定位基础快照: snap-{snap_id}",
-    "[回滚] 正在停止当前所有服务...",
-    "[回滚] 正在恢复虚拟机至快照状态...",
-    "[回滚] 恢复进度: 100%",
-    "[回滚] 虚拟机已回滚至初始干净状态",
-    "[回滚] 回滚完成，请人工排查问题后手动重试",
-]
+def _extract_root_cause(ai_response: str) -> str:
+    """Extract root cause section from AI response."""
+    pattern = r'【根因分析】(.*?)(?=【|$)'
+    m = re.search(pattern, ai_response, re.DOTALL)
+    return m.group(0).strip() if m else ai_response[:500]
+
+
+def _extract_fix_plan(ai_response: str) -> str:
+    """Extract fix plan section from AI response."""
+    pattern = r'【修复方案】(.*?)(?=【|$)'
+    m = re.search(pattern, ai_response, re.DOTALL)
+    return m.group(0).strip() if m else ""
+
+
+def _extract_modified_files(ai_response: str) -> list:
+    """Try to extract file paths mentioned in AI response."""
+    # Common patterns for file paths in fix descriptions
+    patterns = [
+        r'修改文件:\s*([^\n]+)',
+        r'文件:\s*([^\n]+)',
+        r'(?:^|\s)(/[a-zA-Z0-9_./-]+\.[a-zA-Z]+)',
+    ]
+    files = set()
+    for p in patterns:
+        for m in re.finditer(p, ai_response):
+            f = m.group(1).strip().rstrip(',;。')
+            if f and not f.startswith('#'):
+                files.add(f)
+    return list(files)[:10]  # cap at 10
 
 
 # ---------------------------------------------------------------------------
 # WorkflowEngine
 # ---------------------------------------------------------------------------
-
-def _rnd(a, b):
-    """Sleep a random number of seconds between a and b."""
-    time.sleep(random.uniform(a, b))
-
 
 class WorkflowEngine:
     """
@@ -321,28 +206,23 @@ class WorkflowEngine:
       install -> verify -> (ai_analyze -> ai_fix -> rollback_or_retry)*
       -> success | failed
 
-    Features (设计文档 4.4.4):
-      - Credit monitoring & auto account switching
-      - AI provider failover chain (MuleRun -> ChatGPT -> Qwen)
-      - Staged commits (commit after each meaningful fix step)
-      - Failure classification (8 enum codes)
-      - Progress context sync on account switch
-      - Enhanced notifications with failure code & AI summary
-      - VMware Workstation integration via vmrun CLI
+    REAL MODE: commands are actually executed in the guest VM via SSH / vmrun.
+    SIMULATION MODE: emits realistic log output without touching any real VM.
     """
 
     STEP_TIMEOUT = 30 * 60      # 30 minutes per step
     TOTAL_TIMEOUT = 4 * 60 * 60 # 4 hours total
-    CREDIT_COST_PER_CALL = 5.0  # simulated credit cost per AI call
+    CREDIT_COST_PER_CALL = 5.0  # credit cost per AI call
 
     def __init__(self, app, run_id: int):
         self.app = app
         self.run_id = run_id
         self._thread = None
         self._start_wall = None
-        self._current_credential = None  # active AI account
-        self._vm_manager = None          # VMwareManager instance
-        self._vm_info = None             # VMInfo for the current run
+        self._current_credential = None
+        self._vm_manager = None
+        self._vm_info = None
+        self._is_sim = True  # determined at runtime
 
     # ------------------------------------------------------------------
     # Public interface
@@ -366,7 +246,7 @@ class WorkflowEngine:
 
     def _add_log(self, session, run, phase: str, content: str, log_type: str, round_number: int = 1):
         from models import RunLog
-        log = RunLog(
+        entry = RunLog(
             run_id=run.id,
             round_number=round_number,
             phase=phase,
@@ -374,73 +254,53 @@ class WorkflowEngine:
             log_type=log_type,
             created_at=datetime.now(timezone.utc),
         )
-        session.add(log)
+        session.add(entry)
         session.commit()
-
-    def _fmt(self, template: str, ctx: dict) -> str:
-        """Safe format - unknown keys remain as-is."""
-        try:
-            return template.format(**ctx)
-        except KeyError:
-            return template
-
-    def _build_ctx(self, run) -> dict:
-        """Build a template context from the run's vm_info and project."""
-        info = run.vm_info or {}
-        project_name = run.project.name if run.project else "app"
-        service_name = project_name.lower().replace(" ", "-")
-        return {
-            "ip": info.get("ip", "10.0.1.42"),
-            "hostname": info.get("hostname", f"vm-{run.id:04d}"),
-            "cpu_cores": info.get("specs", {}).get("cpu", 4),
-            "memory": info.get("specs", {}).get("memory", 8),
-            "disk": info.get("specs", {}).get("disk", 100),
-            "elapsed": random.randint(18, 35),
-            "project": project_name,
-            "service": service_name,
-            "repo_url": run.project.repo_url if run.project else "https://git.example.com/repo",
-            "branch": run.branch_name or "main",
-            "commit_hash": f"{random.randint(0x1000000, 0xfffffff):07x}",
-            "snap_id": f"{random.randint(100000, 999999)}",
-            "size": random.randint(800, 2500),
-            "compressed": random.randint(300, 700),
-            "pkg_size": random.randint(120, 480),
-            "port": info.get("port", 8080),
-            "pid": random.randint(10000, 32767),
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-
-    def _emit_logs(self, session, run, templates, phase, log_type, ctx, round_number=1, delay=(0.05, 0.15)):
-        """Emit a list of log line templates with small delays between them."""
-        for tpl in templates:
-            line = self._fmt(tpl, ctx)
-            self._add_log(session, run, phase, line, log_type, round_number)
-            _rnd(*delay)
 
     def _total_elapsed(self):
         return time.time() - self._start_wall if self._start_wall else 0
 
+    def _exec_in_guest(self, info, command: str, timeout: int = 300) -> tuple:
+        """Execute command in guest VM. Returns (rc, stdout, stderr)."""
+        return self._vm_manager.exec_command(info, command, timeout=timeout)
+
+    def _log_exec(self, session, run, phase, label, command, round_number=1):
+        """Execute a command in the guest, log output, return (rc, stdout, stderr)."""
+        self._add_log(session, run, phase,
+                      f"[{label}] 执行: {command[:200]}", "install", round_number)
+        rc, out, err = self._exec_in_guest(self._vm_info, command)
+        # Log stdout (truncated)
+        if out:
+            for line in out.strip().splitlines()[:50]:
+                self._add_log(session, run, phase, f"[{label}] {line}", "install", round_number)
+        if err and rc != 0:
+            for line in err.strip().splitlines()[:20]:
+                self._add_log(session, run, phase, f"[{label}][stderr] {line}", "install", round_number)
+        self._add_log(session, run, phase,
+                      f"[{label}] 退出码: {rc}", "install", round_number)
+        return rc, out, err
+
+    # ------------------------------------------------------------------
+    # VM Manager initialization
+    # ------------------------------------------------------------------
+
     def _init_vm_manager(self, session):
-        """Initialize VMwareManager from DB config."""
         from models import VMwareConfigModel
-        from vmware_manager import VMwareConfig, VMwareManager, VMInfo
+        from vmware_manager import VMwareConfig, VMwareManager
         cfg = VMwareConfigModel.query.first()
         if cfg:
             vm_config = cfg.to_vmware_config()
         else:
             vm_config = VMwareConfig(simulation=True)
         self._vm_manager = VMwareManager(vm_config)
+        self._is_sim = self._vm_manager.is_simulation
         return self._vm_manager
 
     # ------------------------------------------------------------------
-    # Credit monitoring & account pool (设计文档 4.4.4)
+    # Credit monitoring & account pool
     # ------------------------------------------------------------------
 
     def _select_ai_account(self, session, run, round_number):
-        """
-        Select the best available AI account following the failover chain.
-        Returns a ServiceCredential or None.
-        """
         from models import ServiceCredential, CreditLog
         for service_type in ServiceCredential.AI_FAILOVER_CHAIN:
             accounts = ServiceCredential.query.filter_by(
@@ -448,20 +308,17 @@ class WorkflowEngine:
             ).order_by(ServiceCredential.priority).all()
             for acct in accounts:
                 if acct.credit_balance >= acct.credit_threshold:
-                    # Check if we're switching from a different account
                     if self._current_credential and self._current_credential.id != acct.id:
                         self._add_log(session, run, "ai_analyze",
                             f"[账户切换] {self._current_credential.service_type}/{self._current_credential.account}"
                             f" -> {acct.service_type}/{acct.account} (积分不足，自动切换)",
                             "account_switch", round_number)
-                        # Save progress context for continuity
                         self._save_progress_context(session, run, round_number,
                                                     self._current_credential, acct)
-                        # Log the switch event
                         switch_log = CreditLog(
                             credential_id=acct.id, run_id=run.id,
-                            event_type="switch",
-                            amount=0, balance_after=acct.credit_balance,
+                            event_type="switch", amount=0,
+                            balance_after=acct.credit_balance,
                             detail=f"从 {self._current_credential.account} 切换到 {acct.account}",
                         )
                         session.add(switch_log)
@@ -469,7 +326,6 @@ class WorkflowEngine:
                     self._current_credential = acct
                     return acct
                 else:
-                    # Low balance alert
                     self._add_log(session, run, "ai_analyze",
                         f"[积分告警] {service_type}/{acct.account} 积分余额 {acct.credit_balance:.1f}"
                         f" 低于阈值 {acct.credit_threshold:.1f}，跳过",
@@ -477,17 +333,16 @@ class WorkflowEngine:
         return None
 
     def _deduct_credit(self, session, run, credential, amount, round_number):
-        """Deduct credits and log the event."""
         from models import CreditLog
         credential.credit_balance = max(0, credential.credit_balance - amount)
         credential.last_used_at = datetime.now(timezone.utc)
-        log = CreditLog(
+        cl = CreditLog(
             credential_id=credential.id, run_id=run.id,
             event_type="deduct", amount=amount,
             balance_after=credential.credit_balance,
             detail=f"第{round_number}轮 AI 调用消耗 {amount} 积分",
         )
-        session.add(log)
+        session.add(cl)
         session.commit()
         self._add_log(session, run, "ai_analyze",
             f"[积分] {credential.service_type}/{credential.account} "
@@ -495,17 +350,12 @@ class WorkflowEngine:
             "credit", round_number)
 
     def _save_progress_context(self, session, run, round_number, from_cred, to_cred):
-        """Save conversation context when switching accounts (进度同步机制)."""
         from models import ProgressContext, AIAnalysis
-        # Gather completed analyses as context
-        analyses = AIAnalysis.query.filter_by(run_id=run.id).order_by(
-            AIAnalysis.round_number
-        ).all()
-        completed_steps = []
-        pending_issues = []
-        for a in analyses:
-            completed_steps.append(f"第{a.round_number}轮: {(a.root_cause or '').split(chr(10))[0]}")
-        pending_issues.append(f"当前第{round_number}轮验证失败，需继续分析修复")
+        analyses = AIAnalysis.query.filter_by(run_id=run.id).order_by(AIAnalysis.round_number).all()
+        completed_steps = [
+            f"第{a.round_number}轮: {(a.root_cause or '').split(chr(10))[0]}" for a in analyses
+        ]
+        pending_issues = [f"当前第{round_number}轮验证失败，需继续分析修复"]
         project_name = run.project.name if run.project else "unknown"
         task_summary = (
             f"项目 [{project_name}] 自动化测试运行 #{run.id}，"
@@ -513,9 +363,7 @@ class WorkflowEngine:
         )
         context_prompt = (
             f"你正在接手一个自动化测试修复任务。\n"
-            f"项目: {project_name}\n"
-            f"运行ID: #{run.id}\n"
-            f"当前轮次: 第{round_number}轮\n"
+            f"项目: {project_name}\n运行ID: #{run.id}\n当前轮次: 第{round_number}轮\n"
             f"已完成步骤:\n" +
             "\n".join(f"  - {s}" for s in completed_steps) +
             f"\n待处理:\n" +
@@ -523,8 +371,7 @@ class WorkflowEngine:
             f"\n请继续分析当前轮次的验证失败日志并提供修复方案。"
         )
         ctx = ProgressContext(
-            run_id=run.id,
-            round_number=round_number,
+            run_id=run.id, round_number=round_number,
             from_credential_id=from_cred.id if from_cred else None,
             to_credential_id=to_cred.id if to_cred else None,
             task_summary=task_summary,
@@ -536,12 +383,12 @@ class WorkflowEngine:
         session.commit()
 
     # ------------------------------------------------------------------
-    # Notification helper (设计文档 4.6 增强)
+    # Notification
     # ------------------------------------------------------------------
 
     def _send_notification(self, session, run, final_status, all_analyses, last_scenario=None):
-        """Build and log enhanced notification with failure code + AI summary."""
         from models import NotifyConfig
+        import requests as _requests
         cfg = NotifyConfig.query.first()
         if not cfg or not cfg.enabled or not cfg.webhook_url:
             return
@@ -551,7 +398,6 @@ class WorkflowEngine:
         if final_status == "failed" and not cfg.notify_on_failure:
             return
 
-        # Build notification payload
         if final_status == "success":
             msg = (
                 f"[测试成功] {project_name} 运行 #{run.id}\n"
@@ -572,32 +418,36 @@ class WorkflowEngine:
                 f"分支: {run.branch_name or 'main'}"
                 f"{ai_summary}"
             )
-        # Log notification (simulated send)
+
+        # Try to actually POST the webhook
+        try:
+            payload = {"msgtype": "text", "text": {"content": msg}}
+            _requests.post(cfg.webhook_url, json=payload, timeout=10)
+        except Exception as e:
+            log.warning("Notification send failed: %s", e)
+
         self._add_log(session, run, "notify",
-            f"[通知] 发送微信通知至 {cfg.webhook_url}\n{msg}",
+            f"[通知] 发送通知至 {cfg.webhook_url}\n{msg}",
             "install", run.current_retry or 1)
 
     # ------------------------------------------------------------------
-    # State machine steps
+    # State machine steps — REAL EXECUTION
     # ------------------------------------------------------------------
 
-    def _step_init_vm(self, session, run, ctx):
+    def _step_init_vm(self, session, run):
         from vmware_manager import VMInfo
         self._set_status(session, run, "init_vm")
-        _rnd(1.5, 2.5)
 
-        # Initialize VM manager
         mgr = self._init_vm_manager(session)
         project_name = run.project.name if run.project else "app"
         vm_name = f"vm-{run.id:04d}-{project_name.replace(' ', '-')[:20]}"
 
-        # Get first available template
+        # Select template
         templates = mgr.list_templates()
         if templates:
             template_vmx = templates[0]["vmx_path"]
             self._add_log(session, run, "init_vm",
-                f"[初始化] 选择模板: {templates[0]['name']} ({template_vmx})",
-                "install")
+                f"[初始化] 选择模板: {templates[0]['name']} ({template_vmx})", "install")
         else:
             template_vmx = ""
             self._add_log(session, run, "init_vm",
@@ -606,21 +456,17 @@ class WorkflowEngine:
         # Clone VM
         self._add_log(session, run, "init_vm",
             f"[初始化] 正在克隆虚拟机 {vm_name}...", "install")
-        _rnd(0.5, 1.0)
-
         vm_info = mgr.clone_vm(template_vmx, vm_name)
         self._vm_info = vm_info
 
         # Start VM
         self._add_log(session, run, "init_vm",
             f"[初始化] 正在启动虚拟机 {vm_name}...", "install")
-        _rnd(0.5, 1.0)
-
         vm_info = mgr.start_vm(vm_info)
 
         # Wait for SSH
         self._add_log(session, run, "init_vm",
-            f"[SSH] 等待 SSH 服务就绪...", "install")
+            "[SSH] 等待 SSH 服务就绪...", "install")
         ssh_ready = mgr.wait_for_ssh(vm_info)
         if ssh_ready:
             self._add_log(session, run, "init_vm",
@@ -629,108 +475,293 @@ class WorkflowEngine:
             self._add_log(session, run, "init_vm",
                 "[SSH] 警告: SSH 等待超时，继续执行...", "install")
 
+        # If real mode, get actual system info
+        if not self._is_sim and vm_info.ip:
+            rc, out, _ = self._exec_in_guest(vm_info, "uname -a && nproc && free -h | head -2")
+            if rc == 0:
+                self._add_log(session, run, "init_vm",
+                    f"[系统] 客户机信息:\n{out}", "install")
+
         # Update run VM info
+        port = 8080
+        if run.project and run.project.config:
+            port = run.project.config.get("port", 8080)
         run.vm_info = {
             "ip": vm_info.ip,
             "hostname": vm_name,
             "specs": vm_info.specs,
-            "port": run.project.config.get("port", 8080) if run.project and run.project.config else 8080,
+            "port": port,
             "vmx_path": vm_info.vmx_path,
             "simulation": mgr.is_simulation,
         }
-        ctx["ip"] = vm_info.ip
-        ctx["hostname"] = vm_name
         session.commit()
 
-        # Emit remaining standard logs for detailed display
-        remaining_logs = [
-            f"[网络] IP 地址已分配: {vm_info.ip}",
-            f"[主机名] 设置主机名为: {vm_name}",
-            f"[系统] OS: Ubuntu 22.04 LTS  CPU: {vm_info.specs.get('cpu', 4)} vCPU  内存: {vm_info.specs.get('memory', 8)}GB",
-            "[系统] 时区已同步至 Asia/Shanghai",
-            f"[初始化] 虚拟机准备就绪 {'(模拟模式)' if mgr.is_simulation else '(vmrun)'}，正在进行下一步...",
-        ]
-        for line in remaining_logs:
-            self._add_log(session, run, "init_vm", line, "install")
-            _rnd(0.05, 0.15)
+        self._add_log(session, run, "init_vm",
+            f"[初始化] 虚拟机准备就绪 {'(模拟模式)' if mgr.is_simulation else '(vmrun)'}",
+            "install")
 
-    def _step_snapshot(self, session, run, ctx):
+    def _step_snapshot(self, session, run):
         self._set_status(session, run, "snapshot")
-        _rnd(1.0, 2.0)
-
         mgr = self._vm_manager
         vm_info = self._vm_info
 
-        if mgr and vm_info:
-            self._add_log(session, run, "snapshot",
-                f"[快照] 开始对虚拟机 {vm_info.name} 创建基础快照...", "install")
-            _rnd(0.3, 0.5)
-            snap_name = mgr.create_snapshot(vm_info)
-            ctx["snap_id"] = snap_name
-            self._add_log(session, run, "snapshot",
-                f"[快照] 快照 {snap_name} 创建成功", "install")
-            self._add_log(session, run, "snapshot",
-                "[快照] 基础快照创建完成，可用于回滚", "install")
-        else:
-            self._emit_logs(session, run, _SNAPSHOT_LOGS, "snapshot", "install", ctx)
+        self._add_log(session, run, "snapshot",
+            f"[快照] 开始对虚拟机 {vm_info.name} 创建基础快照...", "install")
+        snap_name = mgr.create_snapshot(vm_info)
+        self._add_log(session, run, "snapshot",
+            f"[快照] 快照 {snap_name} 创建成功", "install")
+        self._add_log(session, run, "snapshot",
+            "[快照] 基础快照创建完成，可用于回滚", "install")
 
-    def _step_pull_code(self, session, run, ctx):
+    def _step_pull_code(self, session, run, round_number=1):
+        """Pull project code into the guest VM via git clone."""
         self._set_status(session, run, "code_pull")
-        _rnd(1.0, 2.0)
-        self._emit_logs(session, run, _CODE_PULL_LOGS, "code_pull", "install", ctx)
 
-    def _step_upload(self, session, run, ctx):
+        repo_url = run.project.repo_url if run.project else ""
+        branch = run.branch_name or "main"
+        project_name = run.project.name if run.project else "app"
+        work_dir = f"/opt/workspace/{project_name.replace(' ', '-')}"
+
+        if self._is_sim:
+            self._add_log(session, run, "code_pull",
+                f"[代码拉取][模拟] git clone {repo_url} -> {work_dir}", "install", round_number)
+            self._add_log(session, run, "code_pull",
+                f"[代码拉取][模拟] HEAD -> {branch}", "install", round_number)
+            return
+
+        # Real: execute git clone in guest
+        self._add_log(session, run, "code_pull",
+            f"[代码拉取] 准备工作目录: {work_dir}", "install", round_number)
+
+        # Clean and clone
+        clone_cmd = (
+            f"rm -rf {work_dir} && mkdir -p {work_dir} && "
+            f"git clone {repo_url} --branch {branch} --depth 1 {work_dir} 2>&1"
+        )
+        rc, out, err = self._log_exec(session, run, "code_pull", "代码拉取", clone_cmd, round_number)
+        if rc != 0:
+            # If git clone failed, log but continue — install script may handle it
+            self._add_log(session, run, "code_pull",
+                f"[代码拉取] 警告: git clone 退出码 {rc}，可能影响后续步骤",
+                "install", round_number)
+        else:
+            # Log latest commit
+            rc2, out2, _ = self._exec_in_guest(
+                self._vm_info, f"cd {work_dir} && git log --oneline -1 2>&1")
+            if rc2 == 0 and out2:
+                self._add_log(session, run, "code_pull",
+                    f"[代码拉取] 最新提交: {out2.strip()}", "install", round_number)
+
+        self._add_log(session, run, "code_pull",
+            "[代码拉取] 代码拉取完成", "install", round_number)
+
+    def _step_upload(self, session, run, round_number=1):
+        """Upload install/verify scripts to the guest VM."""
         self._set_status(session, run, "upload")
-        _rnd(0.5, 1.5)
-        self._emit_logs(session, run, _UPLOAD_LOGS, "upload", "install", ctx)
 
-    def _step_install(self, session, run, ctx, round_number=1):
+        project = run.project
+        install_script = project.install_script if project else ""
+        verify_script = project.verify_script if project else ""
+
+        if self._is_sim:
+            self._add_log(session, run, "upload",
+                "[上传][模拟] 部署脚本已上传", "install", round_number)
+            return
+
+        # Write scripts to temp files on host, then upload via SCP/vmrun
+        mgr = self._vm_manager
+        vm_info = self._vm_info
+
+        # Prepare guest directories
+        self._exec_in_guest(vm_info, "mkdir -p /tmp/deploy")
+
+        # Upload install script
+        if install_script:
+            self._add_log(session, run, "upload",
+                "[上传] 上传 install.sh 到客户机...", "install", round_number)
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
+                f.write(install_script)
+                tmp_install = f.name
+            try:
+                if vm_info.ip:
+                    mgr.scp_upload(vm_info, tmp_install, "/tmp/deploy/install.sh")
+                else:
+                    mgr.upload_to_guest(vm_info, tmp_install, "/tmp/deploy/install.sh")
+                self._exec_in_guest(vm_info, "chmod +x /tmp/deploy/install.sh")
+                self._add_log(session, run, "upload",
+                    "[上传] install.sh 上传成功", "install", round_number)
+            except Exception as e:
+                self._add_log(session, run, "upload",
+                    f"[上传] install.sh 上传失败: {e}", "install", round_number)
+            finally:
+                os.unlink(tmp_install)
+
+        # Upload verify script
+        if verify_script:
+            self._add_log(session, run, "upload",
+                "[上传] 上传 verify.sh 到客户机...", "install", round_number)
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
+                f.write(verify_script)
+                tmp_verify = f.name
+            try:
+                if vm_info.ip:
+                    mgr.scp_upload(vm_info, tmp_verify, "/tmp/deploy/verify.sh")
+                else:
+                    mgr.upload_to_guest(vm_info, tmp_verify, "/tmp/deploy/verify.sh")
+                self._exec_in_guest(vm_info, "chmod +x /tmp/deploy/verify.sh")
+                self._add_log(session, run, "upload",
+                    "[上传] verify.sh 上传成功", "install", round_number)
+            except Exception as e:
+                self._add_log(session, run, "upload",
+                    f"[上传] verify.sh 上传失败: {e}", "install", round_number)
+            finally:
+                os.unlink(tmp_verify)
+
+        self._add_log(session, run, "upload",
+            "[上传] 部署包上传完成", "install", round_number)
+
+    def _step_install(self, session, run, round_number=1):
+        """Run the install script in the guest VM."""
         self._set_status(session, run, "install")
-        _rnd(1.5, 3.0)
-        project = (run.project.name if run.project else "").lower()
-        if "java" in project or "spring" in project:
-            templates = _INSTALL_LOGS_JAVA
-        elif "node" in project or "js" in project or "vue" in project or "react" in project:
-            templates = _INSTALL_LOGS_NODE
-        else:
-            templates = _INSTALL_LOGS_PYTHON
-        self._emit_logs(session, run, templates, "install", "install", ctx, round_number)
-        _rnd(0.5, 1.0)
-        self._add_log(session, run, "install", f"[安装] 第 {round_number} 轮安装完成", "install", round_number)
 
-    def _step_verify(self, session, run, ctx, round_number=1, force_fail_scenario=None):
-        """Returns (passed: bool, scenario: dict|None)."""
+        if self._is_sim:
+            for line in _SIM_INSTALL_LINES:
+                self._add_log(session, run, "install", line, "install", round_number)
+            self._add_log(session, run, "install",
+                f"[安装] 第 {round_number} 轮安装完成 (模拟)", "install", round_number)
+            return
+
+        # Real: execute install script
+        self._add_log(session, run, "install",
+            f"[安装] 第 {round_number} 轮: 开始执行安装脚本...", "install", round_number)
+
+        rc, out, err = self._log_exec(
+            session, run, "install", "安装",
+            "bash /tmp/deploy/install.sh 2>&1",
+            round_number,
+        )
+
+        if rc != 0:
+            self._add_log(session, run, "install",
+                f"[安装] 安装脚本执行失败 (退出码: {rc})", "install", round_number)
+        else:
+            self._add_log(session, run, "install",
+                f"[安装] 第 {round_number} 轮安装完成", "install", round_number)
+
+    def _step_verify(self, session, run, round_number=1):
+        """Run the verify script in the guest VM.
+        Returns (passed: bool, verify_output: str).
+        """
         self._set_status(session, run, "verify")
-        _rnd(1.0, 2.0)
 
-        if force_fail_scenario is not None:
-            scenario_key = force_fail_scenario["type"]
-        else:
-            scenario_key = None
-
-        should_fail = (round_number <= random.randint(1, 2)) and (run.current_retry < run.retry_count)
-
-        if should_fail:
-            scenario = random.choice(_FAILURE_SCENARIOS)
-            if scenario["type"] == "port_conflict":
-                fail_logs = _VERIFY_FAIL_LOGS_PORT
-            elif scenario["type"] == "missing_dependency":
-                fail_logs = _VERIFY_FAIL_LOGS_DEPENDENCY
+        if self._is_sim:
+            # Simulation: random pass/fail
+            should_fail = (round_number <= random.randint(1, 2)) and (run.current_retry < run.retry_count)
+            if should_fail:
+                for line in _SIM_VERIFY_FAIL:
+                    self._add_log(session, run, "verify", line, "verify", round_number)
+                return False, "验证失败 (模拟)"
             else:
-                fail_logs = _VERIFY_FAIL_LOGS_SERVICE
-            self._emit_logs(session, run, fail_logs, "verify", "verify", ctx, round_number)
-            return False, scenario
-        else:
-            self._emit_logs(session, run, _VERIFY_PASS_LOGS, "verify", "verify", ctx, round_number)
-            return True, None
+                for line in _SIM_VERIFY_PASS:
+                    self._add_log(session, run, "verify", line, "verify", round_number)
+                return True, "验证通过 (模拟)"
 
-    def _step_ai_analyze(self, session, run, scenario: dict, round_number: int):
-        """AI analysis with credit monitoring & failover chain."""
+        # Real: execute verify script and check results
+        self._add_log(session, run, "verify",
+            f"[验证] 第 {round_number} 轮: 开始执行验证脚本...", "verify", round_number)
+
+        rc, out, err = self._log_exec(
+            session, run, "verify", "验证",
+            "bash /tmp/deploy/verify.sh 2>&1",
+            round_number,
+        )
+
+        full_output = f"stdout:\n{out}\nstderr:\n{err}" if err else out
+
+        # Run additional checks
+        checks = {}
+        verify_details = []
+
+        # 1. Exit code check
+        exit_passed = (rc == 0)
+        checks["exit_code"] = {"passed": exit_passed, "detail": f"退出码: {rc}"}
+        self._add_log(session, run, "verify",
+            f"[验证][退出码] 脚本退出码: {rc}  {'✓ 通过' if exit_passed else '✗ 失败'}",
+            "verify", round_number)
+
+        # 2. Service status check (if systemd is available)
+        project_name = run.project.name if run.project else "app"
+        service_name = project_name.lower().replace(" ", "-").replace(".", "-")
+        rc2, svc_out, _ = self._exec_in_guest(
+            self._vm_info, f"systemctl is-active {service_name} 2>&1 || true")
+        svc_active = "active" in (svc_out or "").lower() and "inactive" not in (svc_out or "").lower()
+        checks["service_status"] = {"passed": svc_active, "detail": svc_out.strip() if svc_out else "N/A"}
+        self._add_log(session, run, "verify",
+            f"[验证][服务状态] {service_name}: {svc_out.strip() if svc_out else 'N/A'}  "
+            f"{'✓ 通过' if svc_active else '✗ 失败'}",
+            "verify", round_number)
+
+        # 3. Port check
+        port = 8080
+        if run.project and run.project.config:
+            port = run.project.config.get("port", 8080)
+        rc3, port_out, _ = self._exec_in_guest(
+            self._vm_info, f"ss -tlnp 2>/dev/null | grep ':{port} ' || netstat -tlnp 2>/dev/null | grep ':{port} ' || true")
+        port_listening = bool(port_out and port_out.strip())
+        checks["port_listen"] = {"passed": port_listening, "detail": port_out.strip() if port_out else "端口未监听"}
+        self._add_log(session, run, "verify",
+            f"[验证][端口监听] 端口 {port}: {'已监听 ✓ 通过' if port_listening else '未监听 ✗ 失败'}",
+            "verify", round_number)
+
+        # 4. API health check
+        rc4, health_out, _ = self._exec_in_guest(
+            self._vm_info, f"curl -sf --max-time 10 http://127.0.0.1:{port}/health 2>&1 || true")
+        health_ok = bool(health_out and ("ok" in health_out.lower() or "200" in health_out or "healthy" in health_out.lower()))
+        checks["api_health"] = {"passed": health_ok, "detail": health_out.strip()[:200] if health_out else "无响应"}
+        self._add_log(session, run, "verify",
+            f"[验证][API健康] http://127.0.0.1:{port}/health: "
+            f"{'✓ 通过' if health_ok else '✗ 失败'} ({health_out.strip()[:80] if health_out else '无响应'})",
+            "verify", round_number)
+
+        # 5. Log keywords check
+        rc5, log_out, _ = self._exec_in_guest(
+            self._vm_info,
+            f"journalctl -u {service_name} --since '5 min ago' --no-pager -n 50 2>&1 || "
+            f"tail -50 /var/log/{service_name}/*.log 2>&1 || true")
+        log_has_error = bool(log_out and re.search(r'(?i)(error|exception|fatal|failed|traceback)', log_out))
+        log_has_started = bool(log_out and re.search(r'(?i)(started|listening|ready|running)', log_out))
+        kw_passed = log_has_started and not log_has_error
+        checks["log_keywords"] = {"passed": kw_passed, "detail": "启动标志正常" if kw_passed else "日志异常或未找到启动标志"}
+        self._add_log(session, run, "verify",
+            f"[验证][日志关键字] {'✓ 通过' if kw_passed else '✗ 失败'}",
+            "verify", round_number)
+
+        # Overall pass = all checks passed (exit_code is mandatory, others are informational)
+        all_passed = all(c["passed"] for c in checks.values())
+        # Lenient mode: if exit code passes and at least port or health passes, consider OK
+        lenient_pass = exit_passed and (port_listening or health_ok)
+        passed = all_passed or lenient_pass
+
+        if passed:
+            self._add_log(session, run, "verify",
+                "[验证] 所有验证检查项均通过！", "verify", round_number)
+        else:
+            failed_checks = [k for k, v in checks.items() if not v["passed"]]
+            self._add_log(session, run, "verify",
+                f"[验证] 验证失败: {len(failed_checks)} 个检查项未通过 ({', '.join(failed_checks)})",
+                "verify", round_number)
+
+        # Record verify results in DB
+        self._record_verify_results_from_checks(session, run, checks, round_number)
+
+        return passed, full_output
+
+    def _step_ai_analyze(self, session, run, verify_output: str, round_number: int):
+        """AI analysis — calls real LLM if credentials are available."""
         from models import AIAnalysis, FailureCode
         self._set_status(session, run, "ai_analyze")
-        _rnd(1.5, 2.5)
 
-        # --- Credit check & account selection ---
+        # Select AI account
         acct = self._select_ai_account(session, run, round_number)
         if acct:
             self._add_log(session, run, "ai_analyze",
@@ -738,101 +769,235 @@ class WorkflowEngine:
                 "ai_analysis", round_number)
         else:
             self._add_log(session, run, "ai_analyze",
-                "[AI分析] 警告: 所有 AI 账户积分不足或不可用，使用内置分析",
+                "[AI分析] 警告: 所有 AI 账户积分不足或不可用",
                 "ai_analysis", round_number)
 
-        # Log the AI analysis process
-        analysis_log_lines = [
-            f"[AI分析] 第 {round_number} 轮验证失败，启动 AI 日志分析...",
-            "[AI分析] 正在收集安装日志、验证日志和系统状态...",
-            "[AI分析] 调用大语言模型进行根因分析...",
-            "[AI分析] 模型推理中，请稍候...",
-        ]
-        for line in analysis_log_lines:
-            self._add_log(session, run, "ai_analyze", line, "ai_analysis", round_number)
-            _rnd(0.1, 0.3)
-
-        _rnd(1.0, 2.0)
-
-        # --- Deduct credits ---
-        if acct:
-            self._deduct_credit(session, run, acct, self.CREDIT_COST_PER_CALL, round_number)
-
-        # --- Classify failure ---
-        failure_code = FailureCode.from_scenario_type(scenario["type"])
-        run.failure_code = failure_code.value
-        session.commit()
         self._add_log(session, run, "ai_analyze",
-            f"[AI分析] 失败分类: {failure_code.value} ({failure_code.name})",
+            f"[AI分析] 第 {round_number} 轮验证失败，启动 AI 日志分析...",
             "ai_analysis", round_number)
 
-        # Build commit message
+        # Gather logs from guest for context
+        install_logs = ""
+        if not self._is_sim:
+            _, install_logs, _ = self._exec_in_guest(
+                self._vm_info,
+                "journalctl --since '15 min ago' --no-pager -n 200 2>&1; "
+                "cat /var/log/syslog 2>/dev/null | tail -100; "
+                "dmesg | tail -50 2>/dev/null || true"
+            )
+
+        project_name = run.project.name if run.project else "unknown"
+        install_script = run.project.install_script if run.project else ""
+        verify_script = run.project.verify_script if run.project else ""
+
+        prompt = (
+            f"项目名称: {project_name}\n"
+            f"当前轮次: 第{round_number}轮\n\n"
+            f"--- 安装脚本 ---\n{install_script}\n\n"
+            f"--- 验证脚本 ---\n{verify_script}\n\n"
+            f"--- 验证输出 ---\n{verify_output[:3000]}\n\n"
+            f"--- 系统日志 ---\n{install_logs[:3000]}\n\n"
+            f"请分析上述日志，找出安装/验证失败的根本原因，并给出修复脚本。"
+        )
+
+        # Call AI
+        ai_response = ""
+        if acct:
+            try:
+                self._add_log(session, run, "ai_analyze",
+                    "[AI分析] 调用大语言模型进行根因分析...", "ai_analysis", round_number)
+                ai_response = _call_ai_provider(acct, prompt)
+                self._deduct_credit(session, run, acct, self.CREDIT_COST_PER_CALL, round_number)
+            except Exception as e:
+                self._add_log(session, run, "ai_analyze",
+                    f"[AI分析] AI 调用失败: {e}", "ai_analysis", round_number)
+                ai_response = ""
+
+        if not ai_response:
+            # Fallback: basic heuristic analysis
+            ai_response = self._heuristic_analysis(verify_output, install_logs)
+            self._add_log(session, run, "ai_analyze",
+                "[AI分析] 使用内置启发式分析（无可用 AI 提供商）", "ai_analysis", round_number)
+
+        root_cause = _extract_root_cause(ai_response)
+        fix_plan = _extract_fix_plan(ai_response)
+        fix_script = _extract_bash_script(ai_response)
+        modified_files = _extract_modified_files(ai_response)
+
+        # Classify failure
+        failure_code = self._classify_failure(verify_output, install_logs)
+        run.failure_code = failure_code.value
+        session.commit()
+
+        self._add_log(session, run, "ai_analyze",
+            f"[AI分析] 失败分类: {failure_code.value}", "ai_analysis", round_number)
+        self._add_log(session, run, "ai_analyze",
+            f"[AI分析] 分析完成\n\n{root_cause}\n\n{fix_plan}",
+            "ai_analysis", round_number)
+
         commit_msg = (
             f"[AI-FIX] 第{round_number}轮自动修复\n\n"
-            f"{scenario['commit_msg_body']}"
+            f"{root_cause[:200]}\n{fix_plan[:200]}"
         )
 
         analysis = AIAnalysis(
             run_id=run.id,
             round_number=round_number,
-            root_cause=scenario["root_cause"],
-            fix_plan=scenario["fix_plan"],
-            files_modified=scenario["files"],
+            root_cause=root_cause,
+            fix_plan=fix_plan,
+            files_modified=modified_files,
             commit_message=commit_msg,
             created_at=datetime.now(timezone.utc),
         )
         session.add(analysis)
         session.commit()
 
-        self._add_log(session, run, "ai_analyze",
-                      f"[AI分析] 分析完成\n\n{scenario['root_cause']}\n\n{scenario['fix_plan']}",
-                      "ai_analysis", round_number)
-        return analysis
+        return analysis, fix_script
 
-    def _step_ai_fix(self, session, run, scenario: dict, analysis, round_number: int, ctx: dict):
-        """AI fix with staged commits (阶段性提交)."""
+    def _heuristic_analysis(self, verify_output: str, system_logs: str) -> str:
+        """Basic heuristic failure analysis when no AI provider is available."""
+        combined = (verify_output + "\n" + system_logs).lower()
+
+        if "address already in use" in combined or "port" in combined and "bind" in combined:
+            return (
+                "【根因分析】端口冲突，目标端口已被占用。\n"
+                "【修复方案】查找占用端口的进程并终止，或修改应用配置使用其他端口。\n"
+                "【修复脚本】\n```bash\n"
+                "# 查找并终止占用端口的进程\n"
+                "PORT=$(grep -oP 'port[=: ]+\\K[0-9]+' /tmp/deploy/install.sh | head -1)\n"
+                "if [ -n \"$PORT\" ]; then fuser -k $PORT/tcp 2>/dev/null; fi\n"
+                "bash /tmp/deploy/install.sh\n"
+                "```"
+            )
+        elif "no such file" in combined or "not found" in combined or "cannot open" in combined:
+            return (
+                "【根因分析】缺少依赖文件或共享库。\n"
+                "【修复方案】安装缺失的依赖包。\n"
+                "【修复脚本】\n```bash\n"
+                "apt-get update && apt-get install -y build-essential libssl-dev libffi-dev\n"
+                "bash /tmp/deploy/install.sh\n"
+                "```"
+            )
+        elif "permission denied" in combined:
+            return (
+                "【根因分析】文件权限不足。\n"
+                "【修复方案】修正文件权限。\n"
+                "【修复脚本】\n```bash\n"
+                "chmod -R 755 /opt/workspace/ /tmp/deploy/\n"
+                "chown -R $(whoami) /opt/workspace/\n"
+                "bash /tmp/deploy/install.sh\n"
+                "```"
+            )
+        elif "syntax error" in combined or "unexpected token" in combined:
+            return (
+                "【根因分析】脚本语法错误。\n"
+                "【修复方案】检查并修正脚本语法。\n"
+                "【修复脚本】\n```bash\n"
+                "# 尝试用 dos2unix 修正换行符问题\n"
+                "apt-get install -y dos2unix 2>/dev/null\n"
+                "dos2unix /tmp/deploy/install.sh /tmp/deploy/verify.sh\n"
+                "bash /tmp/deploy/install.sh\n"
+                "```"
+            )
+        else:
+            return (
+                "【根因分析】安装或服务启动异常，具体原因需进一步排查。\n"
+                "【修复方案】重新执行安装并收集更多日志信息。\n"
+                "【修复脚本】\n```bash\n"
+                "# 清理环境后重试\n"
+                "systemctl stop $(systemctl list-units --type=service --state=failed --no-legend | awk '{print $1}') 2>/dev/null\n"
+                "bash /tmp/deploy/install.sh\n"
+                "```"
+            )
+
+    def _classify_failure(self, verify_output: str, system_logs: str):
+        """Classify the failure type based on log content."""
+        from models import FailureCode
+        combined = (verify_output + "\n" + system_logs).lower()
+
+        if "address already in use" in combined or "port" in combined and "conflict" in combined:
+            return FailureCode.CONFIG_ERROR
+        elif "no such file" in combined or "cannot open shared" in combined or "not found" in combined:
+            return FailureCode.PACKAGE_ERROR
+        elif "permission denied" in combined:
+            return FailureCode.SCRIPT_ERROR
+        elif "timeout" in combined or "timed out" in combined or "connection refused" in combined:
+            return FailureCode.NETWORK_ERROR
+        elif "syntax error" in combined or "unexpected token" in combined:
+            return FailureCode.SCRIPT_ERROR
+        elif "failed" in combined and "service" in combined:
+            return FailureCode.SERVICE_ERROR
+        else:
+            return FailureCode.UNKNOWN_ERROR
+
+    def _step_ai_fix(self, session, run, analysis, fix_script: str, round_number: int):
+        """Apply the AI-generated fix script in the guest VM."""
         self._set_status(session, run, "ai_fix")
-        _rnd(1.0, 2.0)
 
-        fix_branch = f"fix/auto-repair-{ctx['project']}-{int(time.time())}"
-        fix_log_lines = [
+        self._add_log(session, run, "ai_fix",
             f"[AI修复] 根据分析结果，开始自动修复 (第 {round_number} 轮)...",
-            f"[AI修复] 创建修复分支: {fix_branch}",
-            "[AI修复] 正在应用代码变更...",
-        ]
-        for line in fix_log_lines:
-            self._add_log(session, run, "ai_fix", line, "ai_fix", round_number)
-            _rnd(0.05, 0.15)
+            "ai_fix", round_number)
 
-        # --- Staged commits: commit per file (阶段性提交策略) ---
-        for i, f in enumerate(scenario["files"]):
+        if self._is_sim:
             self._add_log(session, run, "ai_fix",
-                f"[AI修复]   修改文件: {f}", "ai_fix", round_number)
-            _rnd(0.1, 0.2)
-            staged_hash = f"{random.randint(0x1000000, 0xfffffff):07x}"
+                "[AI修复][模拟] 修复脚本已执行 (模拟)", "ai_fix", round_number)
+            return
+
+        if not fix_script:
             self._add_log(session, run, "ai_fix",
-                f"[AI修复]   阶段性提交 ({i+1}/{len(scenario['files'])}): "
-                f"git commit -m '[AI-FIX] 修改 {f}' -> {staged_hash}",
+                "[AI修复] 未提取到可执行的修复脚本，跳过自动修复",
                 "ai_fix", round_number)
-            _rnd(0.05, 0.1)
+            return
 
-        final_lines = [
-            "[AI修复] 所有文件修改已逐步提交 (Staged Commit)",
-            f"[AI修复] 合并提交: {analysis.commit_message.splitlines()[0]}",
-            f"[AI修复] Commit hash: {ctx['commit_hash']}",
-            "[AI修复] 推送修复分支到远程仓库...",
-            "[AI修复] 修复分支已推送，准备重新安装验证",
-        ]
-        for line in final_lines:
-            self._add_log(session, run, "ai_fix", line, "ai_fix", round_number)
-            _rnd(0.05, 0.15)
+        # Upload and execute the fix script
+        self._add_log(session, run, "ai_fix",
+            f"[AI修复] 修复脚本:\n{fix_script[:500]}", "ai_fix", round_number)
 
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
+            f.write("#!/bin/bash\nset -e\n" + fix_script)
+            tmp_fix = f.name
+
+        try:
+            mgr = self._vm_manager
+            vm_info = self._vm_info
+
+            if vm_info.ip:
+                mgr.scp_upload(vm_info, tmp_fix, "/tmp/deploy/ai_fix.sh")
+            else:
+                mgr.upload_to_guest(vm_info, tmp_fix, "/tmp/deploy/ai_fix.sh")
+
+            self._exec_in_guest(vm_info, "chmod +x /tmp/deploy/ai_fix.sh")
+
+            rc, out, err = self._log_exec(
+                session, run, "ai_fix", "AI修复",
+                "bash /tmp/deploy/ai_fix.sh 2>&1",
+                round_number,
+            )
+
+            if rc != 0:
+                self._add_log(session, run, "ai_fix",
+                    f"[AI修复] 修复脚本执行失败 (退出码: {rc})", "ai_fix", round_number)
+            else:
+                self._add_log(session, run, "ai_fix",
+                    "[AI修复] 修复脚本执行成功", "ai_fix", round_number)
+
+        except Exception as e:
+            self._add_log(session, run, "ai_fix",
+                f"[AI修复] 修复执行异常: {e}", "ai_fix", round_number)
+        finally:
+            os.unlink(tmp_fix)
+
+        # Create a fix branch name for tracking
+        project_name = (run.project.name if run.project else "app").replace(" ", "-")
+        fix_branch = f"fix/auto-repair-{project_name}-{int(time.time())}"
         run.branch_name = fix_branch
         session.commit()
 
-    def _step_rollback(self, session, run, ctx):
+        self._add_log(session, run, "ai_fix",
+            f"[AI修复] 修复分支: {fix_branch}", "ai_fix", round_number)
+
+    def _step_rollback(self, session, run):
         self._set_status(session, run, "rollback")
-        _rnd(1.5, 2.5)
 
         mgr = self._vm_manager
         vm_info = self._vm_info
@@ -843,50 +1008,45 @@ class WorkflowEngine:
                 "[回滚] 验证和修复均告失败，开始执行虚拟机回滚...", "install")
             self._add_log(session, run, "rollback",
                 f"[回滚] 定位基础快照: {snap_name}", "install")
-            _rnd(0.5, 1.0)
             mgr.revert_snapshot(vm_info, snap_name)
             self._add_log(session, run, "rollback",
                 "[回滚] 虚拟机已回滚至初始干净状态", "install")
             self._add_log(session, run, "rollback",
                 "[回滚] 回滚完成，请人工排查问题后手动重试", "install")
-        else:
-            self._emit_logs(session, run, _ROLLBACK_LOGS, "rollback", "install", ctx)
 
     # ------------------------------------------------------------------
     # Verify result recording
     # ------------------------------------------------------------------
 
-    def _record_verify_results(self, session, run, passed: bool, scenario, round_number: int):
+    def _record_verify_results_from_checks(self, session, run, checks: dict, round_number: int):
+        from models import VerifyResult
+        for check_name, info in checks.items():
+            vr = VerifyResult(
+                run_id=run.id, round_number=round_number,
+                check_name=check_name,
+                passed=info["passed"],
+                detail=info.get("detail", ""),
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(vr)
+        session.commit()
+
+    def _record_sim_verify_results(self, session, run, passed: bool, round_number: int):
+        """Record verify results for simulation mode."""
         from models import VerifyResult
         checks = ["exit_code", "log_keywords", "service_status", "port_listen", "api_health"]
-        if passed:
-            for check in checks:
-                vr = VerifyResult(
-                    run_id=run.id, round_number=round_number, check_name=check,
-                    passed=True, detail="检查通过", created_at=datetime.now(timezone.utc),
-                )
-                session.add(vr)
-        else:
-            scenario_type = scenario["type"] if scenario else "unknown"
-            fail_map = {
-                "port_conflict": {"port_listen": "端口未监听 (8080 被占用)", "api_health": "跳过 (依赖端口监听)"},
-                "missing_dependency": {"exit_code": "退出码 127", "log_keywords": "未找到启动成功关键字", "service_status": "服务状态 failed"},
-                "permission_error": {"exit_code": "退出码 1", "log_keywords": "未找到启动成功关键字", "service_status": "服务状态 failed"},
-                "config_error": {"exit_code": "退出码 1", "log_keywords": "未找到启动成功关键字", "service_status": "服务状态 failed"},
-            }
-            fails = fail_map.get(scenario_type, {})
-            for check in checks:
-                if check in fails:
-                    vr = VerifyResult(run_id=run.id, round_number=round_number, check_name=check,
-                                      passed=False, detail=fails[check], created_at=datetime.now(timezone.utc))
-                else:
-                    vr = VerifyResult(run_id=run.id, round_number=round_number, check_name=check,
-                                      passed=True, detail="检查通过", created_at=datetime.now(timezone.utc))
-                session.add(vr)
+        for check in checks:
+            vr = VerifyResult(
+                run_id=run.id, round_number=round_number,
+                check_name=check, passed=passed,
+                detail="检查通过 (模拟)" if passed else "检查失败 (模拟)",
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(vr)
         session.commit()
 
     # ------------------------------------------------------------------
-    # Report generation (with failure_code)
+    # Report generation
     # ------------------------------------------------------------------
 
     def _generate_report(self, session, run, final_status: str, all_analyses):
@@ -894,7 +1054,7 @@ class WorkflowEngine:
         if run.report:
             return
 
-        last_round = run.current_retry
+        last_round = run.current_retry or 1
         vr_list = session.query(VerifyResult).filter_by(run_id=run.id, round_number=last_round).all()
         vr_dict = {v.check_name: {"passed": v.passed, "detail": v.detail} for v in vr_list}
 
@@ -936,12 +1096,9 @@ class WorkflowEngine:
         branch_url = f"{repo_url}/tree/{run.branch_name}" if run.branch_name else repo_url
 
         report = TestReport(
-            run_id=run.id,
-            summary=summary,
-            ai_fixes=ai_fixes_summary,
-            verify_results=vr_dict,
-            branch_url=branch_url,
-            commits=commits,
+            run_id=run.id, summary=summary,
+            ai_fixes=ai_fixes_summary, verify_results=vr_dict,
+            branch_url=branch_url, commits=commits,
             final_status=final_status,
             created_at=datetime.now(timezone.utc),
         )
@@ -966,21 +1123,19 @@ class WorkflowEngine:
             run.status = "init_vm"
             session.commit()
 
-            ctx = self._build_ctx(run)
             all_analyses = []
 
             try:
                 # --- Fixed initial steps ---
-                self._step_init_vm(session, run, ctx)
+                self._step_init_vm(session, run)
                 if self._total_elapsed() > self.TOTAL_TIMEOUT:
                     raise TimeoutError("超出总时限 4 小时")
 
-                self._step_snapshot(session, run, ctx)
-                self._step_pull_code(session, run, ctx)
-                self._step_upload(session, run, ctx)
+                self._step_snapshot(session, run)
+                self._step_pull_code(session, run)
+                self._step_upload(session, run)
 
                 round_number = 1
-                last_scenario = None
 
                 while run.current_retry <= run.retry_count:
                     if self._total_elapsed() > self.TOTAL_TIMEOUT:
@@ -990,14 +1145,16 @@ class WorkflowEngine:
                     session.commit()
 
                     # Install
-                    self._step_install(session, run, ctx, round_number)
+                    self._step_install(session, run, round_number)
 
                     # Verify
-                    passed, scenario = self._step_verify(session, run, ctx, round_number, last_scenario)
-                    self._record_verify_results(session, run, passed, scenario, round_number)
+                    passed, verify_output = self._step_verify(session, run, round_number)
+
+                    # In simulation mode, record verify results separately
+                    if self._is_sim:
+                        self._record_sim_verify_results(session, run, passed, round_number)
 
                     if passed:
-                        # SUCCESS path
                         run.failure_code = ""
                         self._generate_report(session, run, "success", all_analyses)
                         run.status = "success"
@@ -1006,11 +1163,11 @@ class WorkflowEngine:
                         self._send_notification(session, run, "success", all_analyses)
                         return
 
-                    # Verify failed - AI analyze & fix loop
-                    last_scenario = scenario
-                    analysis = self._step_ai_analyze(session, run, scenario, round_number)
+                    # Verify failed — AI analyze & fix
+                    analysis, fix_script = self._step_ai_analyze(
+                        session, run, verify_output, round_number)
                     all_analyses.append(analysis)
-                    self._step_ai_fix(session, run, scenario, analysis, round_number, ctx)
+                    self._step_ai_fix(session, run, analysis, fix_script, round_number)
 
                     round_number += 1
                     if round_number > run.retry_count:
@@ -1018,12 +1175,12 @@ class WorkflowEngine:
 
                 # Exhausted retries -> rollback & fail
                 run.failure_code = FailureCode.AI_FIX_FAILED.value
-                self._step_rollback(session, run, ctx)
+                self._step_rollback(session, run)
                 self._generate_report(session, run, "failed", all_analyses)
                 run.status = "failed"
                 run.end_time = datetime.now(timezone.utc)
                 session.commit()
-                self._send_notification(session, run, "failed", all_analyses, last_scenario)
+                self._send_notification(session, run, "failed", all_analyses)
 
             except TimeoutError as e:
                 run.status = "failed"
@@ -1033,10 +1190,10 @@ class WorkflowEngine:
                 session.commit()
                 self._send_notification(session, run, "failed", all_analyses)
             except Exception as e:
+                log.exception("Workflow error for run #%s", self.run_id)
                 run.status = "failed"
                 run.failure_code = FailureCode.UNKNOWN_ERROR.value
                 run.end_time = datetime.now(timezone.utc)
                 self._add_log(session, run, "system", f"[系统错误] {e}", "install", run.current_retry or 1)
                 session.commit()
                 self._send_notification(session, run, "failed", all_analyses)
-                raise

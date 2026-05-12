@@ -173,11 +173,16 @@ class VMRunCLI:
     # --- Cloning ---
 
     def clone(self, template_vmx: str, dest_vmx: str, clone_type: str = "linked",
-              snapshot_name: str = ""):
-        """Clone a VM.  clone_type: linked | full"""
+              snapshot_name: str = "", clone_name: str = ""):
+        """Clone a VM.  clone_type: linked | full
+        snapshot_name: base snapshot to clone from (required for linked clones)
+        clone_name: display name for the cloned VM
+        """
         args = ["clone", template_vmx, dest_vmx, clone_type]
         if snapshot_name:
-            args.append(f"-cloneName={snapshot_name}")
+            args.append(f"-snapshot={snapshot_name}")
+        if clone_name:
+            args.append(f"-cloneName={clone_name}")
         self._run(*args, timeout=600)
 
     # --- Snapshots ---
@@ -466,6 +471,32 @@ class VMwareManager:
             info.vmx_path, guest_path, host_path,
             user=self.config.ssh_user
         )
+
+    def exec_command(self, info: VMInfo, command: str, timeout: int = 300) -> tuple:
+        """Execute a command on the guest. Tries SSH first, falls back to vmrun.
+        Returns (returncode, stdout, stderr).
+        """
+        if self._simulation:
+            log.info("[SIM] exec on %s: %s", info.name, command[:120])
+            return (0, "[SIM] OK", "")
+
+        # Prefer SSH if IP is available
+        if info.ip:
+            rc, out, err = self.ssh_exec(info, command, timeout=timeout)
+            if rc != -1:  # -1 means SSH itself failed (timeout/connection)
+                return (rc, out, err)
+            log.warning("SSH failed for %s, falling back to vmrun guest ops", info.name)
+
+        # Fallback: vmrun runScriptInGuest
+        try:
+            out = self._cli.run_script_in_guest(
+                info.vmx_path, "/bin/bash", command,
+                user=self.config.ssh_user,
+                password=self.config.ssh_password,
+            )
+            return (0, out, "")
+        except VMRunError as e:
+            return (1, "", str(e))
 
     # --- SSH remote execution (alternative to vmrun guest ops) ---
 
