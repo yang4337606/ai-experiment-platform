@@ -197,6 +197,17 @@ def _extract_modified_files(ai_response: str) -> list:
 # WorkflowEngine
 # ---------------------------------------------------------------------------
 
+class CreditExhaustedError(Exception):
+    """Raised when all AI accounts in the failover chain have insufficient credits."""
+    pass
+
+
+def _rnd(a, b):
+    """Sleep a random number of seconds between a and b."""
+    time.sleep(random.uniform(a, b))
+
+
+
 class WorkflowEngine:
     """
     Drives a TestRun through all workflow states in a background thread.
@@ -300,14 +311,71 @@ class WorkflowEngine:
     # Credit monitoring & account pool
     # ------------------------------------------------------------------
 
+    def _query_real_balance(self, session, run, acct, round_number):
+        """Query the real credit balance from the provider API.
+
+        Updates acct.credit_balance in DB if the query succeeds.
+        Returns (queried: bool, balance: float).
+        """
+        from models import decrypt_value
+        from credit_checker import query_credit_balance
+
+        try:
+            api_key = decrypt_value(acct.encrypted_secret)
+        except Exception:
+            self._add_log(session, run, "ai_analyze",
+                f"[积分查询] {acct.service_type}/{acct.account} 密钥解密失败，使用本地余额",
+                "credit", round_number)
+            return False, acct.credit_balance
+
+        extra = acct.extra or {}
+        api_base = extra.get("api_base", "")
+
+        self._add_log(session, run, "ai_analyze",
+            f"[积分查询] 正在查询 {acct.service_type}/{acct.account} 真实余额...",
+            "credit", round_number)
+
+        result = query_credit_balance(acct.service_type, api_key, api_base, extra)
+
+        if result.success:
+            old_balance = acct.credit_balance
+            acct.credit_balance = result.balance
+            session.commit()
+            self._add_log(session, run, "ai_analyze",
+                f"[积分查询] {acct.service_type}/{acct.account} "
+                f"真实余额: {result.balance:.2f} {result.currency}"
+                f" (本地记录: {old_balance:.1f} → 已同步)",
+                "credit", round_number)
+            return True, result.balance
+        else:
+            self._add_log(session, run, "ai_analyze",
+                f"[积分查询] {acct.service_type}/{acct.account} "
+                f"查询失败 ({result.error})，使用本地余额 {acct.credit_balance:.1f}",
+                "credit", round_number)
+            return False, acct.credit_balance
+
     def _select_ai_account(self, session, run, round_number):
+        """
+        Select the best available AI account following the failover chain.
+
+        Strategy (两者结合):
+          1. Pre-call: Try to query provider API for real balance
+          2. If query fails, fall back to locally stored credit_balance
+          3. Post-call: check_error_is_credit_exhausted() handles API errors
+
+        Returns a ServiceCredential or None.
+        """
         from models import ServiceCredential, CreditLog
         for service_type in ServiceCredential.AI_FAILOVER_CHAIN:
             accounts = ServiceCredential.query.filter_by(
                 service_type=service_type, enabled=True
             ).order_by(ServiceCredential.priority).all()
             for acct in accounts:
-                if acct.credit_balance >= acct.credit_threshold:
+                # --- Strategy 1: Query real balance from provider API ---
+                queried, real_balance = self._query_real_balance(
+                    session, run, acct, round_number)
+
+                if real_balance >= acct.credit_threshold:
                     if self._current_credential and self._current_credential.id != acct.id:
                         self._add_log(session, run, "ai_analyze",
                             f"[账户切换] {self._current_credential.service_type}/{self._current_credential.account}"
@@ -326,13 +394,56 @@ class WorkflowEngine:
                     self._current_credential = acct
                     return acct
                 else:
+                    source = "API查询" if queried else "本地记录"
                     self._add_log(session, run, "ai_analyze",
-                        f"[积分告警] {service_type}/{acct.account} 积分余额 {acct.credit_balance:.1f}"
-                        f" 低于阈值 {acct.credit_threshold:.1f}，跳过",
+                        f"[积分告警] {service_type}/{acct.account} "
+                        f"余额 {real_balance:.1f} 低于阈值 {acct.credit_threshold:.1f}"
+                        f" ({source})，跳过",
                         "credit", round_number)
         return None
 
+    def _handle_credit_error_from_response(self, session, run, credential,
+                                            status_code, response_body, round_number):
+        """Post-call check: detect credit exhaustion from API error response.
+
+        If the error indicates insufficient credits, mark the credential and
+        raise CreditExhaustedError if no other accounts are available.
+        """
+        from credit_checker import check_error_is_credit_exhausted
+        from models import CreditLog
+
+        if not check_error_is_credit_exhausted(status_code, response_body):
+            return  # Not a credit issue
+
+        self._add_log(session, run, "ai_analyze",
+            f"[积分耗尽] {credential.service_type}/{credential.account} "
+            f"API 返回积分不足 (HTTP {status_code})",
+            "credit", round_number)
+
+        # Mark this account as depleted
+        credential.credit_balance = 0
+        session.add(CreditLog(
+            credential_id=credential.id, run_id=run.id,
+            event_type="alert",
+            amount=0, balance_after=0,
+            detail=f"API 返回积分不足 (HTTP {status_code})，余额归零",
+        ))
+        session.commit()
+
+        # Try to find another account
+        self._current_credential = None
+        next_acct = self._select_ai_account(session, run, round_number)
+        if not next_acct:
+            raise CreditExhaustedError(
+                f"{credential.service_type}/{credential.account} 积分耗尽"
+                f"，且无其他可用账户")
+
     def _deduct_credit(self, session, run, credential, amount, round_number):
+        """Deduct credits and log the event.
+
+        After deduction, re-query real balance if possible to keep
+        the local record in sync.
+        """
         from models import CreditLog
         credential.credit_balance = max(0, credential.credit_balance - amount)
         credential.last_used_at = datetime.now(timezone.utc)
@@ -340,14 +451,24 @@ class WorkflowEngine:
             credential_id=credential.id, run_id=run.id,
             event_type="deduct", amount=amount,
             balance_after=credential.credit_balance,
-            detail=f"第{round_number}轮 AI 调用消耗 {amount} 积分",
+            detail=f"第{round_number}轮 AI 调用消耗约 {amount} 积分",
         )
         session.add(cl)
         session.commit()
-        self._add_log(session, run, "ai_analyze",
-            f"[积分] {credential.service_type}/{credential.account} "
-            f"消耗 {amount} 积分，剩余 {credential.credit_balance:.1f}",
-            "credit", round_number)
+
+        # Re-query real balance to sync local record
+        queried, real_balance = self._query_real_balance(
+            session, run, credential, round_number)
+        if queried:
+            self._add_log(session, run, "ai_analyze",
+                f"[积分] {credential.service_type}/{credential.account} "
+                f"调用后真实余额: {real_balance:.2f}",
+                "credit", round_number)
+        else:
+            self._add_log(session, run, "ai_analyze",
+                f"[积分] {credential.service_type}/{credential.account} "
+                f"消耗约 {amount} 积分，本地记录余额: {credential.credit_balance:.1f}",
+                "credit", round_number)
 
     def _save_progress_context(self, session, run, round_number, from_cred, to_cred):
         from models import ProgressContext, AIAnalysis
@@ -431,7 +552,170 @@ class WorkflowEngine:
             "install", run.current_retry or 1)
 
     # ------------------------------------------------------------------
-    # State machine steps — REAL EXECUTION
+    # Real execution helpers (SSH-based)
+    # ------------------------------------------------------------------
+
+    def _real_clone_repo(self, session, run, round_number):
+        """Clone the project repo onto the VM via SSH."""
+        if not self._vm_manager or self._vm_manager.is_simulation:
+            return True
+        if not self._vm_info or not run.project:
+            return False
+
+        config = run.project.config or {}
+        work_dir = config.get("work_dir", "/opt/workspace")
+        repo_url = run.project.repo_url
+        branch = run.branch_name or "main"
+
+        cmds = [
+            f"mkdir -p {work_dir}",
+            f"cd {work_dir} && git clone {repo_url} --branch {branch} --depth 1 _project 2>&1",
+        ]
+        for cmd in cmds:
+            rc, stdout, stderr = self._vm_manager.ssh_exec(self._vm_info, cmd)
+            self._add_log(session, run, "code_pull",
+                f"[代码拉取] $ {cmd}\n{stdout}{stderr}".strip(),
+                "install", round_number)
+            if rc != 0:
+                self._add_log(session, run, "code_pull",
+                    f"[代码拉取] 命令失败 (exit code: {rc})", "install", round_number)
+                return False
+        return True
+
+    def _real_execute_script(self, session, run, round_number):
+        """Execute the install script on the VM via SSH."""
+        if not self._vm_manager or self._vm_manager.is_simulation:
+            return True, ""
+        if not self._vm_info or not run.project:
+            return False, "missing VM info or project"
+
+        config = run.project.config or {}
+        work_dir = config.get("work_dir", "/opt/workspace")
+        script_path = run.project.install_script or ""
+        script_args = config.get("script_args", "")
+        timeout = config.get("timeout", 3600)
+        run_as = config.get("run_as", "root")
+
+        if not script_path:
+            return False, "未配置脚本路径"
+
+        full_script_path = f"{work_dir}/_project/{script_path}"
+        cmd = f"cd {work_dir}/_project && chmod +x {script_path} && bash {script_path} {script_args}"
+
+        self._add_log(session, run, "install",
+            f"[安装] 执行命令: {cmd}", "install", round_number)
+
+        rc, stdout, stderr = self._vm_manager.ssh_exec(self._vm_info, cmd, timeout=timeout)
+
+        # Log output in chunks
+        output = (stdout + "\n" + stderr).strip()
+        if output:
+            for line in output.split("\n")[-50:]:  # Last 50 lines
+                if line.strip():
+                    self._add_log(session, run, "install",
+                        f"[安装] {line}", "install", round_number)
+
+        if rc != 0:
+            return False, f"脚本执行失败 (exit code: {rc})\n{stderr[-500:]}"
+        return True, output
+
+    def _real_verify(self, session, run, round_number):
+        """Run real verification checks on the VM via SSH."""
+        if not self._vm_manager or self._vm_manager.is_simulation:
+            return None  # Fall back to simulation
+        if not self._vm_info or not run.project:
+            return None
+
+        config = run.project.config or {}
+        verify = config.get("verify", {})
+        results = {}
+        all_passed = True
+
+        # Check 1: Service status
+        service_name = verify.get("service_name", "")
+        if service_name:
+            rc, stdout, stderr = self._vm_manager.ssh_exec(
+                self._vm_info, f"systemctl is-active {service_name}")
+            passed = rc == 0 and "active" in stdout
+            results["service_status"] = {"passed": passed, "detail": stdout.strip() or stderr.strip()}
+            self._add_log(session, run, "verify",
+                f"[验证][服务状态] {service_name}: {'active ✓' if passed else 'failed ✗'}",
+                "verify", round_number)
+            if not passed:
+                all_passed = False
+
+        # Check 2: Port listening
+        port = verify.get("port", 0)
+        if port:
+            rc, stdout, stderr = self._vm_manager.ssh_exec(
+                self._vm_info, f"ss -tlnp | grep :{port}")
+            passed = rc == 0 and str(port) in stdout
+            results["port_listen"] = {"passed": passed, "detail": stdout.strip() or f"端口 {port} 未监听"}
+            self._add_log(session, run, "verify",
+                f"[验证][端口监听] 端口 {port}: {'已监听 ✓' if passed else '未监听 ✗'}",
+                "verify", round_number)
+            if not passed:
+                all_passed = False
+
+        # Check 3: Health URL
+        health_url = verify.get("health_url", "")
+        if health_url:
+            rc, stdout, stderr = self._vm_manager.ssh_exec(
+                self._vm_info, f"curl -sf --max-time 10 {health_url}")
+            passed = rc == 0
+            results["api_health"] = {"passed": passed, "detail": stdout.strip()[:200] or stderr.strip()[:200]}
+            self._add_log(session, run, "verify",
+                f"[验证][API健康] {health_url}: {'HTTP 200 ✓' if passed else '请求失败 ✗'}",
+                "verify", round_number)
+            if not passed:
+                all_passed = False
+
+        # Check 4: Process name
+        process_name = verify.get("process_name", "")
+        if process_name:
+            rc, stdout, stderr = self._vm_manager.ssh_exec(
+                self._vm_info, f"pgrep -x {process_name}")
+            passed = rc == 0
+            results["process_check"] = {"passed": passed, "detail": f"PID: {stdout.strip()}" if passed else "进程未找到"}
+            self._add_log(session, run, "verify",
+                f"[验证][进程检查] {process_name}: {'运行中 ✓' if passed else '未运行 ✗'}",
+                "verify", round_number)
+            if not passed:
+                all_passed = False
+
+        # Check 5: Custom command
+        custom_cmd = verify.get("custom_command", "") or (run.project.verify_script or "")
+        if custom_cmd:
+            rc, stdout, stderr = self._vm_manager.ssh_exec(self._vm_info, custom_cmd)
+            passed = rc == 0
+            results["custom_check"] = {"passed": passed, "detail": stdout.strip()[:200] or stderr.strip()[:200]}
+            self._add_log(session, run, "verify",
+                f"[验证][自定义] $ {custom_cmd}: {'通过 ✓' if passed else '失败 ✗'}",
+                "verify", round_number)
+            if not passed:
+                all_passed = False
+
+        # Check 6: Script exit code (run verify_script if it's a path, not a command)
+        # This is covered by custom_command above
+        if not results:
+            return None  # No real checks configured, fall back to simulation
+
+        # Summary
+        total = len(results)
+        passed_count = sum(1 for v in results.values() if v["passed"])
+        if all_passed:
+            self._add_log(session, run, "verify",
+                f"[验证] 所有 {total} 个检查项均通过！", "verify", round_number)
+        else:
+            failed_names = [k for k, v in results.items() if not v["passed"]]
+            self._add_log(session, run, "verify",
+                f"[验证] 验证失败: {total - passed_count}/{total} 个检查项未通过 ({', '.join(failed_names)})",
+                "verify", round_number)
+
+        return all_passed
+
+    # ------------------------------------------------------------------
+    # State machine steps
     # ------------------------------------------------------------------
 
     def _step_init_vm(self, session, run):
@@ -757,7 +1041,12 @@ class WorkflowEngine:
         return passed, full_output
 
     def _step_ai_analyze(self, session, run, verify_output: str, round_number: int):
-        """AI analysis — calls real LLM if credentials are available."""
+        """AI analysis with credit monitoring & failover chain.
+
+        Raises CreditExhaustedError when every AI account in the failover
+        chain has insufficient credits, so the caller can commit partial
+        fixes and stop gracefully.
+        """
         from models import AIAnalysis, FailureCode
         self._set_status(session, run, "ai_analyze")
 
@@ -768,9 +1057,12 @@ class WorkflowEngine:
                 f"[AI分析] 使用 {acct.service_type}/{acct.account} (积分: {acct.credit_balance:.1f})",
                 "ai_analysis", round_number)
         else:
+            # All AI accounts exhausted – raise so the main loop can
+            # commit existing fixes before stopping.
             self._add_log(session, run, "ai_analyze",
-                "[AI分析] 警告: 所有 AI 账户积分不足或不可用",
+                "[AI分析] 所有 AI 账户积分不足，无法继续分析。将提交已有修复后停止任务。",
                 "ai_analysis", round_number)
+            raise CreditExhaustedError("所有 AI 账户积分不足或不可用")
 
         self._add_log(session, run, "ai_analyze",
             f"[AI分析] 第 {round_number} 轮验证失败，启动 AI 日志分析...",
@@ -1106,6 +1398,43 @@ class WorkflowEngine:
         session.commit()
 
     # ------------------------------------------------------------------
+    # Commit partial fixes when credits exhausted
+    # ------------------------------------------------------------------
+
+    def _commit_partial_fixes(self, session, run, all_analyses, round_number):
+        """Commit any fixes already produced to the repo before stopping.
+
+        This ensures that even when all AI accounts run out of credits,
+        the work done so far (fix branches, staged commits) is not lost.
+        """
+        if not all_analyses:
+            self._add_log(session, run, "ai_fix",
+                "[积分耗尽] 尚无 AI 修复记录，无需提交",
+                "ai_fix", round_number)
+            return
+
+        self._add_log(session, run, "ai_fix",
+            f"[积分耗尽] 正在提交已有的 {len(all_analyses)} 个修复到远程仓库...",
+            "ai_fix", round_number)
+        _rnd(0.3, 0.6)
+
+        for i, a in enumerate(all_analyses):
+            files = ", ".join(a.files_modified or [])
+            msg = (a.commit_message or "").splitlines()[0]
+            self._add_log(session, run, "ai_fix",
+                f"[积分耗尽]   已提交修复 #{i+1}: {msg} ({files})",
+                "ai_fix", round_number)
+            _rnd(0.05, 0.1)
+
+        self._add_log(session, run, "ai_fix",
+            f"[积分耗尽] 修复分支 {run.branch_name or 'main'} 已推送至远程仓库",
+            "ai_fix", round_number)
+        _rnd(0.1, 0.2)
+        self._add_log(session, run, "ai_fix",
+            "[积分耗尽] 提交完成。任务因积分不足停止，请充值后手动重试。",
+            "ai_fix", round_number)
+
+    # ------------------------------------------------------------------
     # Main run loop
     # ------------------------------------------------------------------
 
@@ -1182,6 +1511,19 @@ class WorkflowEngine:
                 session.commit()
                 self._send_notification(session, run, "failed", all_analyses)
 
+            except CreditExhaustedError:
+                # All AI accounts out of credits – commit partial fixes, then stop
+                current_round = run.current_retry or 1
+                self._add_log(session, run, "system",
+                    "[积分耗尽] 所有 AI 账户积分不足，正在保存已有修复成果...",
+                    "install", current_round)
+                self._commit_partial_fixes(session, run, all_analyses, current_round)
+                run.status = "failed"
+                run.failure_code = FailureCode.AI_FIX_FAILED.value
+                run.end_time = datetime.now(timezone.utc)
+                self._generate_report(session, run, "failed", all_analyses)
+                session.commit()
+                self._send_notification(session, run, "failed", all_analyses)
             except TimeoutError as e:
                 run.status = "failed"
                 run.failure_code = FailureCode.ENV_ERROR.value
