@@ -268,8 +268,8 @@ a:hover { text-decoration: underline; }
 .modal-overlay.active { display: flex; }
 .modal {
   background: var(--bg-surface); border: 1px solid var(--border);
-  border-radius: var(--radius-lg); width: 90%; max-width: 520px;
-  max-height: 80vh; display: flex; flex-direction: column;
+  border-radius: var(--radius-lg); width: 90%; max-width: 680px;
+  max-height: 85vh; display: flex; flex-direction: column;
   box-shadow: 0 8px 32px rgba(0,0,0,0.4);
 }
 .modal-header {
@@ -387,6 +387,50 @@ a:hover { text-decoration: underline; }
 .mb-16 { margin-bottom: 16px; }
 .mb-24 { margin-bottom: 24px; }
 .flex-between { display: flex; justify-content: space-between; align-items: center; }
+
+/* Template Cards */
+.tpl-category { margin-bottom: 28px; }
+.tpl-category-header {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 14px; padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.tpl-category-header .cat-icon { font-size: 20px; }
+.tpl-category-header .cat-name { font-size: 16px; font-weight: 700; }
+.tpl-category-header .cat-count { font-size: 11px; color: var(--text-muted); margin-left: 4px; }
+.tpl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.tpl-card {
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 18px;
+  transition: all var(--transition); cursor: default;
+  display: flex; flex-direction: column; justify-content: space-between;
+}
+.tpl-card:hover { border-color: var(--accent-blue); box-shadow: 0 0 0 1px var(--accent-blue-dim); }
+.tpl-card .tpl-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.tpl-card .tpl-icon { font-size: 22px; }
+.tpl-card .tpl-name { font-size: 14px; font-weight: 600; }
+.tpl-card .tpl-desc { font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; line-height: 1.6; }
+.tpl-card .tpl-actions { display: flex; gap: 6px; }
+.tpl-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.3px;
+  background: var(--accent-blue-dim); color: var(--accent-blue);
+}
+.tpl-filter-bar { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+.tpl-filter-btn {
+  padding: 6px 14px; border-radius: 20px; border: 1px solid var(--border);
+  background: transparent; color: var(--text-secondary); font-size: 12px;
+  font-weight: 500; cursor: pointer; transition: all var(--transition); font-family: inherit;
+}
+.tpl-filter-btn:hover { border-color: var(--accent-blue); color: var(--accent-blue); }
+.tpl-filter-btn.active { background: var(--accent-blue); color: #fff; border-color: var(--accent-blue); }
+/* Script preview */
+.script-preview {
+  background: #0a0d12; border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 14px; font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+  line-height: 1.7; max-height: 350px; overflow-y: auto; white-space: pre-wrap;
+  color: var(--accent-green);
+}
 </style>
 </head>
 <body>
@@ -407,6 +451,10 @@ a:hover { text-decoration: underline; }
     <li class="nav-link" data-page="projects" onclick="App.navigate('projects')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
       <span>项目管理</span>
+    </li>
+    <li class="nav-link" data-page="templates" onclick="App.navigate('templates')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+      <span>脚本模板库</span>
     </li>
     <li class="nav-link" data-page="runs" onclick="App.navigate('runs')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -441,6 +489,8 @@ a:hover { text-decoration: underline; }
     <section id="page-dashboard" class="page active"></section>
     <!-- PAGE: Projects -->
     <section id="page-projects" class="page"></section>
+    <!-- PAGE: Script Templates -->
+    <section id="page-templates" class="page"></section>
     <!-- PAGE: Runs -->
     <section id="page-runs" class="page"></section>
     <!-- PAGE: Run Detail -->
@@ -500,10 +550,10 @@ const App = {
     this.stopPolling();
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.nav-link').forEach(n => n.classList.remove('active'));
-    const basePage = page.split('-')[0] === 'run' ? 'runs' : (page.split('-')[0] === 'report' ? 'reports' : (page === 'vmware' ? 'vmware' : page));
+    const basePage = page.split('-')[0] === 'run' ? 'runs' : (page.split('-')[0] === 'report' ? 'reports' : (page === 'vmware' ? 'vmware' : (page === 'templates' ? 'templates' : page)));
     const navEl = document.querySelector(`.nav-link[data-page="${basePage}"]`);
     if (navEl) navEl.classList.add('active');
-    const titles = { dashboard:'仪表盘', projects:'项目管理', runs:'测试运行', 'run-detail':'运行详情', reports:'测试报告', 'report-detail':'报告详情', vmware:'虚拟机管理', settings:'系统设置' };
+    const titles = { dashboard:'仪表盘', projects:'项目管理', templates:'脚本模板库', runs:'测试运行', 'run-detail':'运行详情', reports:'测试报告', 'report-detail':'报告详情', vmware:'虚拟机管理', settings:'系统设置' };
     document.getElementById('page-title').textContent = titles[page] || page;
     const pageEl = document.getElementById('page-' + page);
     if (pageEl) pageEl.classList.add('active');
@@ -511,6 +561,7 @@ const App = {
     switch(page) {
       case 'dashboard': this.loadDashboard(); break;
       case 'projects': this.loadProjects(); break;
+      case 'templates': this.loadTemplates(); break;
       case 'runs': this.loadRuns(); break;
       case 'run-detail': this.loadRunDetail(id); break;
       case 'reports': this.loadReports(); break;
@@ -685,7 +736,10 @@ const App = {
     el.innerHTML = `
       <div class="flex-between mb-16">
         <div class="section-title">项目列表</div>
-        <button class="btn btn--primary" onclick="App.showProjectModal()">+ 新建项目</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn--ghost" onclick="App.navigate('templates')">从模板创建</button>
+          <button class="btn btn--primary" onclick="App.showProjectModal()">+ 新建项目</button>
+        </div>
       </div>
       <div class="project-grid">${projects.map(p => `
         <div class="project-card">
@@ -1409,6 +1463,177 @@ const App = {
   async testNotify() {
     const r = await this.api.post('/api/notify/test', {});
     this.toast(r && r.message ? r.message : '通知已发送', 'info');
+  },
+
+  // === Script Templates ===
+  _tplData: null,
+  _tplFilter: 'all',
+
+  async loadTemplates() {
+    const el = document.getElementById('page-templates');
+    const data = await this.api.get('/api/script-templates');
+    if (!data) return;
+    this._tplData = data;
+    this._tplFilter = 'all';
+    this._renderTemplates(el, data);
+  },
+
+  _renderTemplates(el, data) {
+    const allCats = Object.keys(data);
+    const filter = this._tplFilter;
+    const filteredCats = filter === 'all' ? allCats : allCats.filter(c => c === filter);
+
+    let totalCount = 0;
+    allCats.forEach(c => totalCount += data[c].length);
+
+    el.innerHTML = `
+      <div class="flex-between mb-16">
+        <div>
+          <div class="section-title">一键安装脚本模板库</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:4px">
+            共 ${totalCount} 个模板, 覆盖 ${allCats.length} 个分类 — 点击「一键创建」立即生成项目并运行
+          </div>
+        </div>
+      </div>
+      <div class="tpl-filter-bar">
+        <button class="tpl-filter-btn ${filter==='all'?'active':''}" onclick="App._filterTpl('all')">全部</button>
+        ${allCats.map(c => `<button class="tpl-filter-btn ${filter===c?'active':''}" onclick="App._filterTpl('${c}')">${c}</button>`).join('')}
+      </div>
+      ${filteredCats.map(cat => `
+        <div class="tpl-category">
+          <div class="tpl-category-header">
+            <span class="cat-icon">${data[cat][0]?.icon||''}</span>
+            <span class="cat-name">${cat}</span>
+            <span class="cat-count">(${data[cat].length})</span>
+          </div>
+          <div class="tpl-grid">
+            ${data[cat].map(t => `
+              <div class="tpl-card">
+                <div>
+                  <div class="tpl-header">
+                    <span class="tpl-icon">${t.icon||''}</span>
+                    <span class="tpl-name">${this.escHtml(t.name)}</span>
+                  </div>
+                  <div class="tpl-desc">${this.escHtml(t.description)}</div>
+                  ${t.config && t.config.port ? `<span class="tpl-badge">端口 ${t.config.port}</span>` : ''}
+                </div>
+                <div class="tpl-actions">
+                  <button class="btn btn--primary btn--sm" onclick="App.oneClickCreate('${t.id}')">一键创建</button>
+                  <button class="btn btn--ghost btn--sm" onclick="App.previewTemplate('${t.id}')">查看脚本</button>
+                  <button class="btn btn--ghost btn--sm" onclick="App.createFromTemplate('${t.id}')">自定义创建</button>
+                </div>
+              </div>`).join('')}
+          </div>
+        </div>`).join('')}`;
+  },
+
+  _filterTpl(cat) {
+    this._tplFilter = cat;
+    const el = document.getElementById('page-templates');
+    if (this._tplData) this._renderTemplates(el, this._tplData);
+  },
+
+  async oneClickCreate(templateId) {
+    const r = await this.api.post('/api/script-templates/' + templateId + '/create-project', {});
+    if (r && r.id) {
+      this.toast('项目「' + r.name + '」已创建, 正在启动测试...', 'success');
+      // Immediately start a test run
+      const run = await this.api.post('/api/runs', { project_id: r.id });
+      if (run && run.id) {
+        this.navigate('run-detail', run.id);
+      } else {
+        this.navigate('projects');
+      }
+    } else {
+      this.toast(r && r.error ? r.error : '创建失败', 'error');
+    }
+  },
+
+  async previewTemplate(templateId) {
+    const t = await this.api.get('/api/script-templates/' + templateId);
+    if (!t) return;
+    const body = `
+      <div style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-size:22px">${t.icon||''}</span>
+          <span style="font-weight:700;font-size:15px">${this.escHtml(t.name)}</span>
+          <span class="tpl-badge">${this.escHtml(t.category)}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-secondary)">${this.escHtml(t.description)}</div>
+        ${t.config && Object.keys(t.config).length ? `<div style="font-size:11px;color:var(--text-muted);margin-top:6px">默认配置: ${this.escHtml(JSON.stringify(t.config))}</div>` : ''}
+      </div>
+      <div style="font-size:12px;font-weight:600;color:var(--accent-green);margin-bottom:6px">安装脚本 (install_script)</div>
+      <div class="script-preview">${this.escHtml(t.install_script)}</div>
+      <div style="font-size:12px;font-weight:600;color:var(--accent-blue);margin:12px 0 6px">验证脚本 (verify_script)</div>
+      <div class="script-preview">${this.escHtml(t.verify_script)}</div>`;
+    const footer = `
+      <button class="btn btn--ghost" onclick="App.closeModal()">关闭</button>
+      <button class="btn btn--primary" onclick="App.closeModal();App.oneClickCreate('${t.id}')">一键创建并运行</button>`;
+    this.showModal('脚本预览 — ' + t.name, body, footer);
+  },
+
+  async createFromTemplate(templateId) {
+    const t = await this.api.get('/api/script-templates/' + templateId);
+    if (!t) return;
+    const body = `
+      <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px">
+        <span style="font-size:18px">${t.icon||''}</span>
+        <span style="font-weight:600">${this.escHtml(t.name)}</span>
+        <span class="tpl-badge">${this.escHtml(t.category)}</span>
+      </div>
+      <div class="form-group"><label class="form-label">项目名称</label>
+        <input class="form-input" id="tpl-name" value="${this.escHtml(t.name)}"></div>
+      <div class="form-group"><label class="form-label">仓库地址 (可选)</label>
+        <input class="form-input" id="tpl-repo" placeholder="https://github.com/..."></div>
+      <div class="form-group"><label class="form-label">安装脚本</label>
+        <textarea class="form-textarea" id="tpl-install" style="min-height:120px;font-family:'JetBrains Mono',monospace;font-size:11px">${this.escHtml(t.install_script)}</textarea></div>
+      <div class="form-group"><label class="form-label">验证脚本</label>
+        <textarea class="form-textarea" id="tpl-verify" style="min-height:80px;font-family:'JetBrains Mono',monospace;font-size:11px">${this.escHtml(t.verify_script)}</textarea></div>
+      <div class="form-group"><label class="form-label">配置 (JSON)</label>
+        <textarea class="form-textarea" id="tpl-config" style="min-height:40px;font-family:'JetBrains Mono',monospace;font-size:11px">${t.config?JSON.stringify(t.config,null,2):'{}'}</textarea></div>`;
+    const footer = `
+      <button class="btn btn--ghost" onclick="App.closeModal()">取消</button>
+      <button class="btn btn--primary" onclick="App.submitFromTemplate()">创建项目</button>
+      <button class="btn btn--primary" style="background:var(--accent-green)" onclick="App.submitFromTemplateAndRun()">创建并运行</button>`;
+    this.showModal('从模板创建项目', body, footer);
+  },
+
+  async submitFromTemplate() {
+    const data = {
+      name: document.getElementById('tpl-name').value,
+      repo_url: document.getElementById('tpl-repo').value,
+      install_script: document.getElementById('tpl-install').value,
+      verify_script: document.getElementById('tpl-verify').value,
+      config: document.getElementById('tpl-config').value,
+    };
+    try { data.config = JSON.parse(data.config); } catch(e) { data.config = {}; }
+    if (!data.name) { this.toast('请输入项目名称', 'error'); return; }
+    const r = await this.api.post('/api/projects', data);
+    this.closeModal();
+    if (r && r.id) { this.toast('项目已创建', 'success'); this.navigate('projects'); }
+    else { this.toast(r && r.error ? r.error : '创建失败', 'error'); }
+  },
+
+  async submitFromTemplateAndRun() {
+    const data = {
+      name: document.getElementById('tpl-name').value,
+      repo_url: document.getElementById('tpl-repo').value,
+      install_script: document.getElementById('tpl-install').value,
+      verify_script: document.getElementById('tpl-verify').value,
+      config: document.getElementById('tpl-config').value,
+    };
+    try { data.config = JSON.parse(data.config); } catch(e) { data.config = {}; }
+    if (!data.name) { this.toast('请输入项目名称', 'error'); return; }
+    const r = await this.api.post('/api/projects', data);
+    this.closeModal();
+    if (r && r.id) {
+      this.toast('项目已创建, 启动测试...', 'success');
+      const run = await this.api.post('/api/runs', { project_id: r.id });
+      if (run && run.id) { this.navigate('run-detail', run.id); }
+      else { this.navigate('projects'); }
+    } else {
+      this.toast(r && r.error ? r.error : '创建失败', 'error');
+    }
   },
 
   // === Helpers ===

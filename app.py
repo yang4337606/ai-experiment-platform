@@ -14,6 +14,7 @@ from models import (
 )
 from vmware_manager import VMwareConfig, VMwareManager, get_vmware_manager
 from workflow import WorkflowEngine
+from script_templates import get_templates, get_categories, get_template_by_id
 
 # ---------------------------------------------------------------------------
 # App factory
@@ -789,6 +790,50 @@ def _register_routes(app):
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
 
+    # ---- Script Templates ----
+    @app.route("/api/script-templates", methods=["GET"])
+    def list_script_templates():
+        """Return all script templates grouped by category."""
+        return jsonify(get_categories())
+
+    @app.route("/api/script-templates/all", methods=["GET"])
+    def list_all_script_templates():
+        """Return flat list of all script templates."""
+        return jsonify(get_templates())
+
+    @app.route("/api/script-templates/<template_id>", methods=["GET"])
+    def get_script_template(template_id):
+        t = get_template_by_id(template_id)
+        if not t:
+            return jsonify({"error": "模板不存在"}), 404
+        return jsonify(t)
+
+    @app.route("/api/script-templates/<template_id>/create-project", methods=["POST"])
+    def create_project_from_template(template_id):
+        """One-click: create a project from a script template."""
+        t = get_template_by_id(template_id)
+        if not t:
+            return jsonify({"error": "模板不存在"}), 404
+        data = request.get_json(force=True) if request.data else {}
+        name = data.get("name") or t["name"]
+        repo_url = data.get("repo_url", "")
+        # Ensure unique name
+        if Project.query.filter_by(name=name).first():
+            suffix = 1
+            while Project.query.filter_by(name=f"{name}-{suffix}").first():
+                suffix += 1
+            name = f"{name}-{suffix}"
+        p = Project(
+            name=name,
+            repo_url=repo_url,
+            install_script=t["install_script"],
+            verify_script=t["verify_script"],
+            config=data.get("config") or t.get("config", {}),
+        )
+        db.session.add(p)
+        db.session.commit()
+        return jsonify(p.to_dict()), 201
+
     # ---- Health check ----
     @app.route("/health")
     def health():
@@ -801,4 +846,4 @@ def _register_routes(app):
 
 if __name__ == "__main__":
     application = create_app()
-    application.run(host="0.0.0.0", port=5002, debug=False)
+    application.run(host="0.0.0.0", port=3000, debug=False)
